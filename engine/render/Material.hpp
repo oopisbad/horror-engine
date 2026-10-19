@@ -1,0 +1,34 @@
+#pragma once
+
+#include <memory>
+#include <string>
+
+namespace horror {
+
+class Shader;
+class Texture;
+
+// Material = shader + surface parameters. Deliberately plain data: the
+// renderer is responsible for uploading it (one place knows the uniform
+// names), while gameplay only tweaks values. Keeping bind logic out of the
+// material struct means later passes (deferred G-buffer, post) can reuse the
+// same struct with different upload code.
+//
+// Color space note: albedo stays linear; sRGB decoding happens in the texture
+// at load time when srgb=true.
+struct Material {
+    std::string name; // debug label
+    std::shared_ptr<Shader> shader;
+
+    glm::vec3 albedo{0.7f, 0.7f, 0.7f};
+    float roughness = 0.8f;
+
+    // Emissive contribution is added post-integration, so a fully dark room
+    // with a single emissive strip still reads as a light source.
+    float emissiveStrength = 0.0f;
+
+    float opacity = 1.0f;
+    Texture *baseColorTex = nullptr; // non-owning; owned by TextureCache
+};
+
+} // namespace horror
