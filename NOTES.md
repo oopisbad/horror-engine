@@ -112,7 +112,8 @@ Deliberate choices worth knowing:
 - Character controller: walk/sprint/crouch, gravity, jump, axis-separated
   AABB collision, crouch height smoothing, head bob.
 - ImGui overlay: fps/frame time, draw stats, camera position, wireframe,
-  debug draw, vsync, mouse capture toggles.
+  debug draw, vsync, mouse capture toggles, post-process controls
+  (enable/exposure/vignette/grain/fog) and ambient color/intensity.
 - DebugDraw: lines, boxes, spheres (3 great circles), axes, frustums.
 - Placeholder test scene: corridor + crates + ball, two point lights,
   flashlight, procedural meshes only.
@@ -175,6 +176,14 @@ Deliberate choices worth knowing:
 10. **Flashlight aim matrix** used `-X` for pitch, giving a mirrored vertical
     aim; gameplay now builds `yaw(+Y) * pitch(+X)`, matching
     `Camera::forward()`.
+11. **The shadow map was always empty** — the post pass disables depth testing
+    and the shadow pass inherited that state, so its depth-only FBO was
+    cleared and never written (no shadows anywhere). The shadow pass now sets
+    depth test/mask/cull state explicitly. Verified by reading the map back
+    (44% coverage) and by tinting shadowed cone pixels (3.7% of the frame).
+12. **Film grain was applied before gamma** — in the near-black scene the
+    encode amplified the linear noise into TV static. Grain is now applied
+    after the gamma encode.
 
 ## Known issues / TODO
 

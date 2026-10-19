@@ -117,6 +117,23 @@ void ImGuiOverlay::drawDebugWindows(Application &app)
             app.input().setMouseCaptured(captured);
 
         ImGui::Separator();
+        ImGui::Text("post");
+        auto &post = renderer.post();
+        ImGui::Checkbox("post enabled", &post.enabled);
+        ImGui::SliderFloat("exposure", &post.exposure, 0.1f, 4.0f, "%.2f");
+        ImGui::SliderFloat("vignette", &post.vignette, 0.0f, 1.5f, "%.2f");
+        ImGui::SliderFloat("grain", &post.grain, 0.0f, 0.1f, "%.3f");
+        ImGui::SliderFloat("fog density", &post.fogDensity, 0.0f, 0.2f, "%.3f");
+        ImGui::ColorEdit3("fog color", &post.fogColor.x, ImGuiColorEditFlags_Float);
+
+        // Ambient is the "is the room readable?" knob; keep it very low.
+        AmbientLight ambient = renderer.ambient();
+        if (ImGui::ColorEdit3("ambient color", &ambient.color.x, ImGuiColorEditFlags_Float))
+            renderer.setAmbient(ambient);
+        if (ImGui::SliderFloat("ambient intensity", &ambient.intensity, 0.0f, 3.0f, "%.2f"))
+            renderer.setAmbient(ambient);
+
+        ImGui::Separator();
         ImGui::Text("controls: WASD move · Shift sprint · Ctrl crouch · Space jump");
         ImGui::Text("F1 UI · P wireframe · O debug draw · V vsync · Esc quit");
     }

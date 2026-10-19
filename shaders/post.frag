@@ -65,16 +65,18 @@ void main()
     float vignette = 1.0 - uVignette * dot(centered, centered) * 1.6;
     color *= clamp(vignette, 0.0, 1.0);
 
-    // ---- film grain --------------------------------------------------------
-    // Luminance-weighted: strong in the shadows (where the image is mostly
-    // flat black and grain sells the film look), subtle in the highlights.
-    float noise = hash(vUv * vec2(1920.0, 1080.0) + fract(uTime) * 97.0) - 0.5;
-    float luma = dot(color, vec3(0.299, 0.587, 0.114));
-    color += noise * uGrain * (1.0 - luma * 0.7);
-
     // ---- gamma encode ------------------------------------------------------
     // The swapchain is not sRGB, so encode explicitly (matches the old
     // forward-shader path; a future HDR swapchain would move this).
     color = pow(max(color, vec3(0.0)), vec3(1.0 / 2.2));
+
+    // ---- film grain --------------------------------------------------------
+    // Applied after gamma: a fixed linear amplitude would be amplified by the
+    // encode in near-black areas and turn the shadows into TV static.
+    // Luminance-weighted so highlights stay clean.
+    float noise = hash(vUv * vec2(1920.0, 1080.0) + fract(uTime) * 97.0) - 0.5;
+    float luma = dot(color, vec3(0.299, 0.587, 0.114));
+    color += noise * uGrain * (1.0 - luma * 0.7);
+
     oColor = vec4(color, 1.0);
 }

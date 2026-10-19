@@ -46,7 +46,7 @@ struct PostSettings {
     bool enabled = true;
     float exposure = 1.05f;
     float vignette = 0.85f;       // 0 = off
-    float grain = 0.035f;         // 0 = off
+    float grain = 0.02f;          // 0 = off
     float fogDensity = 0.055f;    // exponential-squared fog (1/m)
     glm::vec3 fogColor{0.0012f, 0.0016f, 0.0026f}; // linear, near black
 };

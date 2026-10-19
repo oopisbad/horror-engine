@@ -251,6 +251,15 @@ void ForwardRenderer::shadowPass(Scene &scene, const Camera &camera)
     flashlightViewProj_ = lightProj * lightView;
 
     shadowTarget_->bind();
+    // State is set per pass instead of inherited: postPass disables depth
+    // testing and the shadow pass runs before mainPass re-enables it, so
+    // without this the depth map was cleared and never written (no shadows).
+    glEnable(GL_DEPTH_TEST);
+    glDepthFunc(GL_LESS);
+    glDepthMask(GL_TRUE);
+    glDisable(GL_BLEND);
+    glEnable(GL_CULL_FACE);
+    glCullFace(GL_BACK);
     glClear(GL_DEPTH_BUFFER_BIT);
     shadowShader_->bind();
     shadowShader_->setUniform("uLightViewProj", flashlightViewProj_);

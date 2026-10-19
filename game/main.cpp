@@ -81,6 +81,9 @@ void buildTestScene(Application &app)
     crate("crate-1", { 0.9f, 0.25f, -3.2f }, 0.5f, { 0.45f, 0.32f, 0.20f });
     crate("crate-2", { 1.3f, 0.25f, -5.5f }, 0.5f, { 0.30f, 0.45f, 0.35f });
     crate("crate-3", { -1.2f, 0.5f, -7.2f }, 1.0f, { 0.55f, 0.40f, 0.25f });
+    // Tall pillar in the flashlight beam: makes the PCF shadow on the floor
+    // and far wall obvious at a glance when running the scene.
+    wall("pillar", { -0.95f, 1.0f, -4.6f }, { 0.25f, 1.0f, 0.25f }, { 0.36f, 0.34f, 0.37f });
 
     // A ball demonstrating the sphere builder (also a collider).
     {
