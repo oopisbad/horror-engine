@@ -10,13 +10,19 @@
 
 namespace horror {
 
-// Interleaved static vertex: position, normal, uv. Kept as a plain struct so
-// loaders (procedural builders today, .gltf/.obj tomorrow) can hand raw
-// buffers straight to the VBO.
+// Interleaved vertex: position, normal, uv0, tangent, joints, weights.
+// One format for everything so static and skinned meshes share the pipeline:
+// static geometry leaves joints/weights zero and the static shader variant
+// simply ignores them. `tangent.w` is the bitangent handedness (+/-1).
+// Attribute locations: 0 pos, 1 normal, 2 uv, 3 tangent, 4 joints, 5 weights.
+// Joints are uvec4 on purpose (integer attribute, no float conversion).
 struct Vertex {
     glm::vec3 position{0.0f};
     glm::vec3 normal{0.0f, 1.0f, 0.0f};
     glm::vec2 uv{0.0f};
+    glm::vec4 tangent{1.0f, 0.0f, 0.0f, 1.0f};
+    glm::uvec4 joints{0u};
+    glm::vec4 weights{0.0f};
 };
 
 // A named GPU mesh: interleaved VBO + element indices in one VAO.

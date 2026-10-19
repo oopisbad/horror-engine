@@ -88,6 +88,18 @@ void Mesh::upload()
     glEnableVertexArrayAttrib(vao_, 2);
     glVertexArrayAttribFormat(vao_, 2, 2, GL_FLOAT, GL_FALSE, offsetof(Vertex, uv));
     glVertexArrayAttribBinding(vao_, 2, 0);
+    // attribute 3: tangent vec4 (w = handedness)
+    glEnableVertexArrayAttrib(vao_, 3);
+    glVertexArrayAttribFormat(vao_, 3, 4, GL_FLOAT, GL_FALSE, offsetof(Vertex, tangent));
+    glVertexArrayAttribBinding(vao_, 3, 0);
+    // attribute 4: joints uvec4 -- integer format, not normalized floats.
+    glEnableVertexArrayAttrib(vao_, 4);
+    glVertexArrayAttribIFormat(vao_, 4, 4, GL_UNSIGNED_INT, offsetof(Vertex, joints));
+    glVertexArrayAttribBinding(vao_, 4, 0);
+    // attribute 5: weights vec4 (sum normalized to 1 by the loader)
+    glEnableVertexArrayAttrib(vao_, 5);
+    glVertexArrayAttribFormat(vao_, 5, 4, GL_FLOAT, GL_FALSE, offsetof(Vertex, weights));
+    glVertexArrayAttribBinding(vao_, 5, 0);
 
     HOR_LOG_TRACE("mesh '{}' uploaded: {} verts, {} indices", name_, vertices_.size(), indices_.size());
 }

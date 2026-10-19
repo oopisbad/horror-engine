@@ -59,6 +59,11 @@ void Scene::destroy(EntityId e)
     stores_.spotLights.erase(e);
     stores_.aabbColliders.erase(e);
     stores_.characterControllers.erase(e);
+    stores_.skinnedMeshRenderers.erase(e);
+    stores_.animators.erase(e);
+    stores_.spawnPoints.erase(e);
+    stores_.triggerVolumes.erase(e);
+    stores_.entityExtras.erase(e);
 }
 
 const std::string &Scene::name(EntityId e) const

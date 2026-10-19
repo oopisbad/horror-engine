@@ -1,5 +1,6 @@
 #include "render/Renderer.hpp"
 
+#include "anim/Animator.hpp"
 #include "core/Log.hpp"
 #include "render/DebugDraw.hpp"
 #include "render/Framebuffer.hpp"
@@ -13,6 +14,7 @@
 #include <glm/gtc/quaternion.hpp>
 #include <glm/gtc/matrix_access.hpp>
 
+#include <algorithm>
 #include <cmath>
 
 namespace horror {
@@ -20,9 +22,18 @@ namespace horror {
 ForwardRenderer::ForwardRenderer(uint32_t shadowMapSize)
 {
     litShader_ = std::make_unique<Shader>("mesh.vert", "mesh.frag", "lit");
+    litSkinnedShader_ = std::make_unique<Shader>("mesh.vert", "mesh.frag", "lit_skinned",
+        std::vector<std::string>{ "SKINNED" });
     debugShader_ = std::make_unique<Shader>("debug.vert", "debug.frag", "debug");
     shadowShader_ = std::make_unique<Shader>("shadow_depth.vert", "shadow_depth.frag", "shadow");
+    shadowSkinnedShader_ = std::make_unique<Shader>("shadow_depth.vert", "shadow_depth.frag",
+        "shadow_skinned", std::vector<std::string>{ "SKINNED" });
     postShader_ = std::make_unique<Shader>("post.vert", "post.frag", "post");
+
+    // std140 array of 128 mat4 = 8 KiB; immutable storage + subdata updates.
+    glCreateBuffers(1, &boneUbo_);
+    glNamedBufferStorage(boneUbo_, kMaxBones * sizeof(glm::mat4), nullptr,
+        GL_DYNAMIC_STORAGE_BIT);
     shadowTarget_ = std::make_unique<Framebuffer>(Framebuffer::Kind::DepthOnly,
         shadowMapSize, shadowMapSize);
     debugDraw_ = std::make_unique<DebugDraw>();
@@ -36,8 +47,21 @@ ForwardRenderer::ForwardRenderer(uint32_t shadowMapSize)
 
 ForwardRenderer::~ForwardRenderer()
 {
+    if (boneUbo_)
+        glDeleteBuffers(1, &boneUbo_);
     if (fullscreenVao_)
         glDeleteVertexArrays(1, &fullscreenVao_);
+}
+
+void ForwardRenderer::uploadBones(const std::vector<glm::mat4> &bones)
+{
+    if (!boneUbo_ || bones.empty())
+        return;
+    const size_t count = std::min(bones.size(), static_cast<size_t>(kMaxBones));
+    if (bones.size() > static_cast<size_t>(kMaxBones))
+        HOR_LOG_WARN_ONCE("skinned mesh has {} bones, GPU limit is {}", bones.size(), kMaxBones);
+    glNamedBufferSubData(boneUbo_, 0, static_cast<GLsizeiptr>(count * sizeof(glm::mat4)), bones.data());
+    glBindBufferBase(GL_UNIFORM_BUFFER, 0, boneUbo_);
 }
 
 void ForwardRenderer::setOutputSize(uint32_t width, uint32_t height)
@@ -70,8 +94,10 @@ bool ForwardRenderer::tickShaderReloads()
 {
     bool any = false;
     any |= litShader_->checkHotReload();
+    any |= litSkinnedShader_->checkHotReload();
     any |= debugShader_->checkHotReload();
     any |= shadowShader_->checkHotReload();
+    any |= shadowSkinnedShader_->checkHotReload();
     any |= postShader_->checkHotReload();
     return any;
 }
@@ -130,21 +156,24 @@ void ForwardRenderer::buildQueue(Scene &scene, const Camera &camera)
 
     const Frustum frustum = Frustum::fromViewProjection(camera.viewProjection());
 
-    scene.view<MeshRenderer>([&](EntityId id, MeshRenderer &mr) {
+    auto enqueue = [&](EntityId id, const Mesh *mesh, const Material *material,
+                       bool castShadow, const std::vector<glm::mat4> *bones) {
         ++stats_.itemsSubmitted;
-        if (!mr.visible || !mr.mesh)
+        if (!mesh)
             return;
         RenderItem item;
-        item.mesh = mr.mesh;
-        item.material = mr.material;
+        item.mesh = mesh;
+        item.material = material;
         item.world = scene.worldMatrix(id);
-        item.castsShadow = mr.castShadow;
+        item.castsShadow = castShadow;
+        item.bones = bones;
 
         // Bounding sphere from local AABB: center transformed directly, radius
         // as the farthest corner distance. Coarser than 6-DoF OBB, plenty for
-        // the primitive sizes in play (and scale-invariant).
-        const glm::vec3 lmin = item.mesh->minBounds();
-        const glm::vec3 lmax = item.mesh->maxBounds();
+        // the primitive sizes in play (and scale-invariant). Skinned meshes
+        // use the rest-pose bounds (poses are near the rest volume here).
+        const glm::vec3 lmin = mesh->minBounds();
+        const glm::vec3 lmax = mesh->maxBounds();
         const glm::vec3 center = glm::vec3(item.world * glm::vec4((lmin + lmax) * 0.5f, 1.0f));
         const glm::vec3 corner = glm::vec3(item.world * glm::vec4(lmax, 1.0f));
         item.centerWorld = center;
@@ -154,6 +183,24 @@ void ForwardRenderer::buildQueue(Scene &scene, const Camera &camera)
             queue_.push_back(item);
         else
             ++stats_.itemsCulled;
+    };
+
+    scene.view<MeshRenderer>([&](EntityId id, MeshRenderer &mr) {
+        if (!mr.visible)
+            return;
+        enqueue(id, mr.mesh, mr.material, mr.castShadow, nullptr);
+    });
+
+    scene.view<SkinnedMeshRenderer>([&](EntityId id, SkinnedMeshRenderer &sr) {
+        if (!sr.visible)
+            return;
+        // Only deform when the same entity has a populated Animator; without
+        // one the mesh renders in its bind pose through the static path.
+        Animator *anim = scene.find<Animator>(id);
+        const std::vector<glm::mat4> *bones = nullptr;
+        if (anim && !anim->boneMatrices.empty())
+            bones = &anim->boneMatrices;
+        enqueue(id, sr.mesh, sr.material, sr.castShadow, bones);
     });
 }
 
@@ -261,18 +308,41 @@ void ForwardRenderer::shadowPass(Scene &scene, const Camera &camera)
     glEnable(GL_CULL_FACE);
     glCullFace(GL_BACK);
     glClear(GL_DEPTH_BUFFER_BIT);
-    shadowShader_->bind();
-    shadowShader_->setUniform("uLightViewProj", flashlightViewProj_);
 
-    for (const RenderItem &item : queue_) {
-        if (!item.castsShadow)
-            continue;
+    auto drawItem = [&](const RenderItem &item) {
+        if (!item.castsShadow || !item.mesh)
+            return;
+        if (item.bones)
+            uploadBones(*item.bones);
         shadowShader_->setUniform("uModel", item.world);
         item.mesh->bind();
         glDrawElements(GL_TRIANGLES, item.mesh->indexCount(), GL_UNSIGNED_INT, nullptr);
         ++stats_.shadowDraws;
-    }
+    };
+
+    // Static casters first with the static program.
+    shadowShader_->bind();
+    shadowShader_->setUniform("uLightViewProj", flashlightViewProj_);
+    for (const RenderItem &item : queue_)
+        if (!item.bones)
+            drawItem(item);
+
+    // Deformed casters need the SKINNED variant (its bone UBO lookup must
+    // match the lit mesh exactly).
+    shadowSkinnedShader_->bind();
+    shadowSkinnedShader_->setUniform("uLightViewProj", flashlightViewProj_);
+    for (const RenderItem &item : queue_)
+        if (item.bones)
+            drawItem(item);
+
     Framebuffer::bindDefault();
+}
+
+void ForwardRenderer::bindLitUniforms(const Shader &shader, Camera &camera)
+{
+    shader.setUniform("uViewProj", camera.viewProjection());
+    shader.setUniform("uCameraPos", camera.position);
+    setupLightingUniforms(shader, camera);
 }
 
 void ForwardRenderer::mainPass(Scene &scene, Camera &camera)
@@ -290,38 +360,45 @@ void ForwardRenderer::mainPass(Scene &scene, Camera &camera)
     glEnable(GL_CULL_FACE);
     glCullFace(GL_BACK);
 
-    litShader_->bind();
-    litShader_->setUniform("uViewProj", camera.viewProjection());
-    litShader_->setUniform("uCameraPos", camera.position);
-    setupLightingUniforms(*litShader_, camera);
-
     if (wireframe_)
         glPolygonMode(GL_FRONT_AND_BACK, GL_LINE);
 
-    for (const RenderItem &item : queue_) {
-        // One shared lit shader draws everything (Material::shader is only a
-        // hint for future multi-shader materials), so a material without an
-        // explicitly assigned shader must still draw.
-        if (!item.material)
-            continue;
-        litShader_->setUniform("uModel", item.world);
-        litShader_->setUniform("uAlbedo", item.material->albedo);
-        litShader_->setUniform("uEmissive", item.material->emissiveStrength);
-        litShader_->setUniform("uRoughness", item.material->roughness);
-        if (item.material->baseColorTex) {
-            item.material->baseColorTex->bind(3);
-            litShader_->setUniform("uHasBaseColorTex", 1);
-        } else {
-            Texture::placeholder().bind(3);
-            litShader_->setUniform("uHasBaseColorTex", 0);
-        }
-        litShader_->setUniform("uBaseColorTex", 3);
+    // One shared lit shader (compiled static + SKINNED variants) draws
+    // everything; Material::shader is only a hint for future multi-shader
+    // materials, so a material without one still draws.
+    auto drawItems = [&](const Shader &shader, bool skinnedPass) {
+        for (const RenderItem &item : queue_) {
+            if (!item.material || (item.bones != nullptr) != skinnedPass)
+                continue;
+            if (skinnedPass)
+                uploadBones(*item.bones);
+            shader.setUniform("uModel", item.world);
+            shader.setUniform("uAlbedo", item.material->albedo);
+            shader.setUniform("uEmissive", item.material->emissiveStrength);
+            shader.setUniform("uRoughness", item.material->roughness);
+            if (item.material->baseColorTex) {
+                item.material->baseColorTex->bind(3);
+                shader.setUniform("uHasBaseColorTex", 1);
+            } else {
+                Texture::placeholder().bind(3);
+                shader.setUniform("uHasBaseColorTex", 0);
+            }
+            shader.setUniform("uBaseColorTex", 3);
 
-        item.mesh->bind();
-        glDrawElements(GL_TRIANGLES, item.mesh->indexCount(), GL_UNSIGNED_INT, nullptr);
-        stats_.triangles += item.mesh->indexCount() / 3;
-        ++stats_.itemsDrawn;
-    }
+            item.mesh->bind();
+            glDrawElements(GL_TRIANGLES, item.mesh->indexCount(), GL_UNSIGNED_INT, nullptr);
+            stats_.triangles += item.mesh->indexCount() / 3;
+            ++stats_.itemsDrawn;
+        }
+    };
+
+    litShader_->bind();
+    bindLitUniforms(*litShader_, camera);
+    drawItems(*litShader_, false);
+
+    litSkinnedShader_->bind();
+    bindLitUniforms(*litSkinnedShader_, camera);
+    drawItems(*litSkinnedShader_, true);
 
     if (wireframe_)
         glPolygonMode(GL_FRONT_AND_BACK, GL_FILL);
@@ -399,6 +476,30 @@ void ForwardRenderer::drawDebugData(Scene &scene, Camera &camera)
     scene.view<AABBCollider>([&](EntityId id, const AABBCollider &col) {
         debugDraw_->addBox(col.worldMin, col.worldMax, glm::vec3(0.2f, 1.0f, 0.4f));
     });
+
+    // Skeleton overlay (cyan bones, yellow joints). Joints come from the
+    // Animator's last evaluated pose, in model space, so the entity's world
+    // matrix places them exactly where the skinned vertices ended up.
+    if (drawBones_) {
+        scene.view<Animator>([&](EntityId id, const Animator &anim) {
+            if (!anim.skeleton || anim.jointWorldPositions.empty())
+                return;
+            const Skeleton &sk = *anim.skeleton;
+            const glm::mat4 &world = scene.worldMatrix(id);
+            const glm::vec3 boneColor(0.2f, 0.9f, 1.0f);
+            const glm::vec3 jointColor(1.0f, 0.9f, 0.2f);
+            for (size_t j = 0; j < anim.jointWorldPositions.size(); ++j) {
+                const glm::vec3 p = glm::vec3(world * glm::vec4(anim.jointWorldPositions[j], 1.0f));
+                debugDraw_->addSphere(p, 0.02f, jointColor, 6);
+                const int parentJoint = sk.jointParents[j];
+                if (parentJoint >= 0 && static_cast<size_t>(parentJoint) < anim.jointWorldPositions.size()) {
+                    const glm::vec3 pp = glm::vec3(
+                        world * glm::vec4(anim.jointWorldPositions[static_cast<size_t>(parentJoint)], 1.0f));
+                    debugDraw_->addLine(p, pp, boneColor);
+                }
+            }
+        });
+    }
 
     debugDraw_->flush(camera.viewProjection());
 }

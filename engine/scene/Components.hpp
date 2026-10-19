@@ -1,10 +1,13 @@
 #pragma once
 
+#include "anim/Animator.hpp"
+
 #include <glm/glm.hpp>
 #include <glm/gtc/quaternion.hpp>
 
 #include <cstdint>
 #include <string>
+#include <unordered_map>
 #include <vector>
 
 namespace horror {
@@ -40,6 +43,37 @@ struct MeshRenderer {
     bool visible = true;
 };
 
+// Renderable whose vertices are deformed by the Animator on the same entity.
+// The entity's transform acts as the model matrix on top of the skin.
+struct SkinnedMeshRenderer {
+    const Mesh *mesh = nullptr;
+    const Material *material = nullptr;
+    bool castShadow = true;
+    bool visible = true;
+};
+
+// ---- level conventions (glTF node names) -----------------------------------
+
+// SPAWN_ node: a marker where gameplay can place the player/AI.
+struct SpawnPoint {
+    std::string tag;                      // "player", "enemy", ...
+    glm::vec3 forward{0.0f, 0.0f, -1.0f}; // world-space facing (node -Z)
+};
+
+// TRIGGER_ node: AABB volume (authored from the node's mesh bounds or extras).
+struct TriggerVolume {
+    std::string tag;
+    glm::vec3 worldMin{0.0f};
+    glm::vec3 worldMax{0.0f};
+    bool once = false;
+    bool fired = false;
+};
+
+// glTF node extras: a flat key/value string map (numbers/bools stringified).
+struct EntityExtras {
+    std::unordered_map<std::string, std::string> values;
+};
+
 // Point light: position comes from its transform; range/falloff below.
 // Intensity is candela-ish (see SpotLight note); dozens for room-scale glow.
 struct PointLight {
@@ -52,6 +86,7 @@ struct PointLight {
 
 // Spot light (the flashlight). Attached to the camera transform by gameplay;
 // the shadow map is produced from this light's world orientation.
+// KHR_lights_punctual spot lights import into this same component.
 // Intensities are candela-ish: meter-scale scenes need tens, not units.
 struct SpotLight {
     glm::vec3 color{1.0f};

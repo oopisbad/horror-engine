@@ -12,6 +12,7 @@
 
 namespace horror {
 
+struct Animator;
 class Scene;
 class Shader;
 class Framebuffer;
@@ -30,6 +31,8 @@ struct RenderItem {
     glm::vec3 centerWorld{0.0f}; // bounding sphere center for culling
     float boundingRadius = 0.0f;
     bool castsShadow = true;
+    // Non-null for skinned meshes: packed joint matrices from the Animator.
+    const std::vector<glm::mat4> *bones = nullptr;
 };
 
 // Ambient occlusion isn't in scope yet; ambient is a flat term with a very
@@ -64,7 +67,8 @@ struct RenderStats {
 // Forward renderer with:
 //   - flashlight spotlight + 2x2-PCF shadow map (the only shadow caster)
 //   - up to 8 point lights (no shadowing yet)
-//   - one shared lit shader for everything (uniform-driven material params)
+//   - one lit shader source pair compiled twice: static, and SKINNED for
+//     GPU skinning through a bone-matrix UBO (uniform-driven materials)
 //   - frustum culling against the camera, at queue-build time
 //
 // Structured for a deferred/post chain: the scene is drawn into a Framebuffer
@@ -86,6 +90,9 @@ public:
     bool wireframe() const { return wireframe_; }
     void setDebugDrawEnabled(bool on);
     bool debugDrawEnabled() const { return debugDrawEnabled_; }
+    // Draw joint lines for skinned meshes (ImGui toggle).
+    void setDrawBones(bool on) { drawBones_ = on; }
+    bool drawBones() const { return drawBones_; }
 
     void setAmbient(const AmbientLight &a) { ambient_ = a; }
     const AmbientLight &ambient() const { return ambient_; }
@@ -114,12 +121,20 @@ private:
     void postPass();
     void drawDebugData(Scene &scene, Camera &camera);
     void setupLightingUniforms(const Shader &shader, const Camera &camera);
+    void bindLitUniforms(const Shader &shader, Camera &camera);
+    void uploadBones(const std::vector<glm::mat4> &bones);
     void ensureOutputTarget();
 
     std::unique_ptr<Shader> litShader_;
+    std::unique_ptr<Shader> litSkinnedShader_;   // same source, SKINNED define
     std::unique_ptr<Shader> debugShader_;
     std::unique_ptr<Shader> shadowShader_;
+    std::unique_ptr<Shader> shadowSkinnedShader_;
     std::unique_ptr<Shader> postShader_;
+
+    // GPU skinning: bone matrices for the current draw. std140 mat4[128].
+    static constexpr int kMaxBones = 128;
+    GLuint boneUbo_ = 0;
 
     std::unique_ptr<Framebuffer> shadowTarget_; // depth-only, flashlight view
     std::unique_ptr<Framebuffer> sceneTarget_;  // HDR color + depth, post input
@@ -134,6 +149,7 @@ private:
     AmbientLight ambient_;
     bool wireframe_ = false;
     bool debugDrawEnabled_ = true;
+    bool drawBones_ = false;
 
     std::unique_ptr<DebugDraw> debugDraw_;
     RenderStats stats_{};

@@ -8,6 +8,7 @@
 #include <filesystem>
 #include <string>
 #include <unordered_map>
+#include <vector>
 
 namespace horror {
 
@@ -21,8 +22,10 @@ namespace horror {
 class Shader {
 public:
     Shader() = default;
+    // `defines` are injected as `#define <entry>` between #version and the
+    // rest of each stage, enabling static/skinned variants of one source pair.
     Shader(const std::string &vertexPath, const std::string &fragmentPath,
-        const std::string &name = "");
+        const std::string &name = "", const std::vector<std::string> &defines = {});
     ~Shader();
 
     Shader(Shader &&) noexcept;
@@ -71,6 +74,7 @@ private:
     SourceRef vertRef_, fragRef_;
 
     std::string name_;
+    std::vector<std::string> defines_;
     std::string lastError_;
     GLuint program_ = 0;
     mutable std::unordered_map<std::string, GLint> uniformCache_;

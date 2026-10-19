@@ -34,10 +34,28 @@ std::filesystem::file_time_type queryMtime(const std::string &path)
     auto t = std::filesystem::last_write_time(path, ec);
     return ec ? std::filesystem::file_time_type::min() : t;
 }
+
+// #version must stay on the first line, so defines go right after it.
+std::string injectDefines(std::string source, const std::vector<std::string> &defines)
+{
+    if (defines.empty())
+        return source;
+    std::string block;
+    block.reserve(defines.size() * 24);
+    for (const std::string &d : defines)
+        block += "#define " + d + "\n";
+    const size_t firstNewline = source.find('\n');
+    if (firstNewline == std::string::npos)
+        return block + source;
+    source.insert(firstNewline + 1, block);
+    return source;
+}
 } // namespace
 
-Shader::Shader(const std::string &vertexPath, const std::string &fragmentPath, const std::string &name)
+Shader::Shader(const std::string &vertexPath, const std::string &fragmentPath,
+    const std::string &name, const std::vector<std::string> &defines)
     : name_(name)
+    , defines_(defines)
 {
     vertRef_.resolvedPath = resolveShaderPath(vertexPath);
     fragRef_.resolvedPath = resolveShaderPath(fragmentPath);
@@ -62,6 +80,7 @@ Shader::Shader(Shader &&o) noexcept
     : vertRef_(std::move(o.vertRef_))
     , fragRef_(std::move(o.fragRef_))
     , name_(std::move(o.name_))
+    , defines_(std::move(o.defines_))
     , lastError_(std::move(o.lastError_))
     , program_(o.program_)
     , uniformCache_(std::move(o.uniformCache_))
@@ -78,6 +97,7 @@ Shader &Shader::operator=(Shader &&o) noexcept
     vertRef_ = std::move(o.vertRef_);
     fragRef_ = std::move(o.fragRef_);
     name_ = std::move(o.name_);
+    defines_ = std::move(o.defines_);
     lastError_ = std::move(o.lastError_);
     program_ = o.program_;
     uniformCache_ = std::move(o.uniformCache_);
@@ -157,6 +177,8 @@ bool Shader::tryLoadProgram()
         HOR_LOG_ERROR("{}", lastError_);
         return false;
     }
+    vertSrc = injectDefines(std::move(vertSrc), defines_);
+    fragSrc = injectDefines(std::move(fragSrc), defines_);
 
     GLuint vert = compileStage(GL_VERTEX_SHADER, vertSrc, name_ + ":vert");
     if (!vert)

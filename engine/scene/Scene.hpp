@@ -92,6 +92,8 @@ public:
     // World-space AABB bounds derived from the collider's local box + transform.
     void refreshColliderBounds();
 
+    // Materials imported from glTF are owned by the GltfModel in the asset
+    // cache; procedural ones live in the pool below.
     // Material/mesh pools the scene owns (mesh/material pointers handed to
     // components point into these; RAII keeps them valid for scene lifetime).
     // TODO(assets): replace with a streamed asset system + refcounted handles.
@@ -121,6 +123,16 @@ private:
             return stores_.aabbColliders;
         else if constexpr (std::is_same_v<T, CharacterController>)
             return stores_.characterControllers;
+        else if constexpr (std::is_same_v<T, SkinnedMeshRenderer>)
+            return stores_.skinnedMeshRenderers;
+        else if constexpr (std::is_same_v<T, Animator>)
+            return stores_.animators;
+        else if constexpr (std::is_same_v<T, SpawnPoint>)
+            return stores_.spawnPoints;
+        else if constexpr (std::is_same_v<T, TriggerVolume>)
+            return stores_.triggerVolumes;
+        else if constexpr (std::is_same_v<T, EntityExtras>)
+            return stores_.entityExtras;
     }
 
     struct Stores {
@@ -129,6 +141,11 @@ private:
         std::unordered_map<EntityId, SpotLight> spotLights;
         std::unordered_map<EntityId, AABBCollider> aabbColliders;
         std::unordered_map<EntityId, CharacterController> characterControllers;
+        std::unordered_map<EntityId, SkinnedMeshRenderer> skinnedMeshRenderers;
+        std::unordered_map<EntityId, Animator> animators;
+        std::unordered_map<EntityId, SpawnPoint> spawnPoints;
+        std::unordered_map<EntityId, TriggerVolume> triggerVolumes;
+        std::unordered_map<EntityId, EntityExtras> entityExtras;
     };
 
     std::vector<EntityRecord> entityRecords_;
