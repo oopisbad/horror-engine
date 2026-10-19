@@ -27,6 +27,11 @@ struct Skeleton {
     std::vector<int> joints;              // node index per joint
     std::vector<int> jointParents;        // joint index into `joints`, -1 = root
     std::vector<glm::mat4> inverseBind;   // one per joint
+    // inverse(world of the mesh node this skin is attached to). glTF defines
+    // jointMatrix = invMeshNodeWorld * jointWorld * inverseBind, i.e. skinning
+    // happens in mesh-node space. Kept separate because the mesh node's world
+    // is also the renderer's model matrix and the two must cancel exactly.
+    glm::mat4 meshNodeInverse{1.0f};
     std::string name;
 
     int jointCount() const { return static_cast<int>(joints.size()); }

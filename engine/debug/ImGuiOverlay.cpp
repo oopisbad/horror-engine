@@ -126,6 +126,49 @@ void ImGuiOverlay::drawDebugWindows(Application &app)
         ImGui::SliderFloat("fog density", &post.fogDensity, 0.0f, 0.2f, "%.3f");
         ImGui::ColorEdit3("fog color", &post.fogColor.x, ImGuiColorEditFlags_Float);
 
+        ImGui::Separator();
+        ImGui::Text("animation");
+        bool bones = renderer.drawBones();
+        if (ImGui::Checkbox("draw bones", &bones))
+            renderer.setDrawBones(bones);
+
+        // Global speed keeps every clip in sync; the combo restarts the
+        // selected clip with a short crossfade.
+        static float animSpeed = 1.0f;
+        if (ImGui::SliderFloat("anim speed", &animSpeed, 0.0f, 3.0f, "%.2f")) {
+            app.scene().view<Animator>([&](EntityId, Animator &animator) {
+                animator.speed = animSpeed;
+            });
+        }
+
+        int shownAnimators = 0;
+        app.scene().view<Animator>([&](EntityId id, Animator &animator) {
+            if (!animator.clips || animator.clips->empty())
+                return;
+            ++shownAnimators;
+            ImGui::PushID(static_cast<int>(id));
+            ImGui::Text("%s", app.scene().name(id).c_str());
+            if (ImGui::BeginCombo("##clip", animator.currentClipName().c_str())) {
+                for (size_t i = 0; i < animator.clips->size(); ++i) {
+                    const auto &clip = (*animator.clips)[i];
+                    if (!clip)
+                        continue;
+                    const bool selected = static_cast<int>(i) == animator.currentClip;
+                    if (ImGui::Selectable(clip->name.c_str(), selected))
+                        animator.playIndex(static_cast<int>(i), 0.2f, true);
+                    if (selected)
+                        ImGui::SetItemDefaultFocus();
+                }
+                ImGui::EndCombo();
+            }
+            ImGui::SameLine();
+            if (ImGui::SmallButton("restart"))
+                animator.playIndex(animator.currentClip, 0.0f, animator.currentLooping);
+            ImGui::PopID();
+        });
+        if (shownAnimators == 0)
+            ImGui::Text("(no animated meshes loaded)");
+
         // Ambient is the "is the room readable?" knob; keep it very low.
         AmbientLight ambient = renderer.ambient();
         if (ImGui::ColorEdit3("ambient color", &ambient.color.x, ImGuiColorEditFlags_Float))

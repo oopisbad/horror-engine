@@ -275,7 +275,11 @@ void AnimationSystem::update(Scene &scene, float deltaSeconds)
             if (node < 0 || static_cast<size_t>(node) >= worlds.size())
                 continue;
             const glm::mat4 &nodeWorld = worlds[static_cast<size_t>(node)];
-            anim.boneMatrices[static_cast<size_t>(j)] = nodeWorld * sk.inverseBind[static_cast<size_t>(j)];
+            // Mesh-node space first, then joint world, then bind inverse.
+            anim.boneMatrices[static_cast<size_t>(j)] = sk.meshNodeInverse * nodeWorld
+                * sk.inverseBind[static_cast<size_t>(j)];
+            // Model-space joint position (the debug drawer applies the entity
+            // world matrix, matching the skinned vertex path).
             anim.jointWorldPositions[static_cast<size_t>(j)] = glm::vec3(nodeWorld[3]);
         }
     });

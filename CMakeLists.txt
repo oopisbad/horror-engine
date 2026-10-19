@@ -64,6 +64,13 @@ target_include_directories(engine PUBLIC
     ${CMAKE_CURRENT_SOURCE_DIR}
     ${CMAKE_CURRENT_SOURCE_DIR}/engine
     ${CMAKE_CURRENT_SOURCE_DIR}/external/stb
+    ${CMAKE_CURRENT_SOURCE_DIR}/external/cgltf
+)
+# Absolute fallbacks so shaders/assets resolve when the game is started from
+# an IDE or any other working directory. Runtime-relative lookup still wins.
+target_compile_definitions(engine PRIVATE
+    HOR_SHADER_SRC_DIR="${CMAKE_CURRENT_SOURCE_DIR}/shaders"
+    HOR_ASSET_SRC_DIR="${CMAKE_CURRENT_SOURCE_DIR}/assets"
 )
 target_link_libraries(engine PUBLIC glad glm::glm glfw imgui)
 

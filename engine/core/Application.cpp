@@ -1,5 +1,6 @@
 #include "core/Application.hpp"
 
+#include "anim/AnimationSystem.hpp"
 #include "debug/ImGuiOverlay.hpp"
 #include "render/Framebuffer.hpp"
 
@@ -60,6 +61,10 @@ int Application::run()
                 onFixedStep(logic_.fixedStepSeconds());
         if (onFrameUpdate)
             onFrameUpdate(frameDt);
+
+        // Animation runs at the variable frame rate (not the fixed step) so
+        // playback stays smooth; gameplay decides what to play per frame.
+        AnimationSystem::update(scene_, frameDt);
 
         scene_.updateWorldMatrices();
         scene_.refreshColliderBounds();

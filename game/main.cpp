@@ -1,3 +1,6 @@
+#include "anim/Animator.hpp"
+#include "asset/GltfAsset.hpp"
+#include "asset/LevelBuilder.hpp"
 #include "core/Application.hpp"
 #include "core/Log.hpp"
 #include "render/Material.hpp"
@@ -118,6 +121,34 @@ void buildTestScene(Application &app)
     scene.add(flashlight, SpotLight{});
 }
 
+// Loads a glTF scene and starts a clip on every Animator it created.
+// `preferredClip` falls back to the first clip when not present.
+void spawnGltfLevel(Application &app, const char *path, const glm::vec3 &position,
+    float yawDegrees, LevelInstance &instance, const char *preferredClip = nullptr,
+    float scale = 1.0f)
+{
+    auto model = app.assets().loadModel(path);
+    if (!model || !model->valid()) {
+        HOR_LOG_WARN("test model '{}' unavailable -- skipping", path);
+        return;
+    }
+
+    Transform transform;
+    transform.position = position;
+    transform.rotation = glm::angleAxis(glm::radians(yawDegrees), glm::vec3(0, 1, 0));
+    transform.scale = glm::vec3(scale);
+    instance = LevelBuilder::instantiate(app.scene(), model, transform);
+
+    app.scene().view<Animator>([&](EntityId, Animator &animator) {
+        if (animator.currentClip >= 0 || !animator.clips || animator.clips->empty())
+            return;
+        int index = preferredClip ? animator.findClip(preferredClip) : 0;
+        if (index < 0)
+            index = 0;
+        animator.playIndex(index, 0.0f, true);
+    });
+}
+
 } // namespace
 
 int main(int argc, char **argv)
@@ -128,6 +159,7 @@ int main(int argc, char **argv)
     // CLI polish at this stage.
     Application::Config cfg;
     int frameLimit = 0;
+    int screenshotFrame = 29;
     std::string screenshotPath;
     for (int i = 1; i < argc; ++i) {
         const std::string a = argv[i];
@@ -144,6 +176,8 @@ int main(int argc, char **argv)
             frameLimit = std::atoi(value());
         else if (a == "--screenshot")
             screenshotPath = value();
+        else if (a == "--shot-frame")
+            screenshotFrame = std::atoi(value());
         else if (a == "--shadow")
             cfg.shadowMapSize = static_cast<uint32_t>(std::atoi(value()));
         else if (a == "--ui")
@@ -154,6 +188,16 @@ int main(int argc, char **argv)
     app.setFrameLimit(frameLimit);
 
     buildTestScene(app);
+
+    // Step 2 test content: Khronos sample models (skinned, animated) in the
+    // corridor. Held in main's scope for the whole run: the level keeps the
+    // asset (meshes/materials/textures) alive.
+    LevelInstance cesiumMan;
+    LevelInstance fox;
+    spawnGltfLevel(app, "test/CesiumMan.glb", { 0.0f, 0.05f, -5.5f }, 0.0f, cesiumMan);
+    // The Fox asset is authored in centimeters (mesh bounds ~80 units tall),
+    // so its level root carries the scale. CesiumMan is already in meters.
+    spawnGltfLevel(app, "test/Fox.glb", { -1.1f, 0.05f, -8.2f }, 25.0f, fox, "Walk", 0.012f);
 
     // --- fixed-step gameplay ------------------------------------------------
     EntityId player = 0; // first created entity is the player (see builder above)
@@ -191,10 +235,10 @@ int main(int argc, char **argv)
     // controller); documented extension point for gameplay animations.
     // Screenshot capture is deferred ~30 frames so startup (shadow map init,
     // ImGui font bake) has definitely settled before the image is read back.
-    app.onFrameUpdate = [&app, player, flashlight, &screenshotPath](float) {
+    app.onFrameUpdate = [&app, player, flashlight, &screenshotPath, screenshotFrame](float) {
         (void)player;
         (void)flashlight;
-        if (!screenshotPath.empty() && app.framesRun() == 29)
+        if (!screenshotPath.empty() && app.framesRun() == screenshotFrame)
             app.requestScreenshot(screenshotPath);
         if (app.framesRun() == 30) {
             const auto &rs = app.renderer().stats();
@@ -203,6 +247,10 @@ int main(int argc, char **argv)
             HOR_LOG_INFO("camera: pos ({:.3f},{:.3f},{:.3f}) yaw {:.3f} pitch {:.3f}",
                 app.camera().position.x, app.camera().position.y, app.camera().position.z,
                 app.camera().yaw, app.camera().pitch);
+            size_t animators = 0;
+            app.scene().view<Animator>([&](EntityId, const Animator &) { ++animators; });
+            HOR_LOG_INFO("scene: {} entities, {} animators, {} asset models alive",
+                app.scene().entityCount(), animators, app.assets().liveCount());
         }
     };
 

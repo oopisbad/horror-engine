@@ -25,6 +25,9 @@ public:
     // Loads from disk; falls back to an error placeholder when missing.
     explicit Texture(const std::string &path,
         const Params &params); // no default arg: GCC can't see nested PMIs yet
+    // Decodes an encoded image from memory (glTF embedded buffer views,
+    // data URIs). Same fallback behavior as the file constructor.
+    Texture(const uint8_t *encoded, size_t size, const Params &params);
     // Manual upload (procedural data, fallbacks, middleware textures).
     Texture(GLenum internalFormat, uint32_t width, uint32_t height, uint32_t depth,
         GLenum format, GLenum type, const void *data, const Params &params);

@@ -132,9 +132,61 @@ Deliberate choices worth knowing:
 | Character controller walk/sprint/crouch/gravity | done |
 | ImGui overlay (fps, frame time, camera pos, wireframe), debug draw | done |
 | Placeholder cube/plane test scene | done |
-| glTF 2.0 loading, skinned vertex format, animations | missing (step 2) |
-| Textures/normal maps in materials | partial (texture path exists, only base color, no loader) |
+| glTF 2.0 loading, skinned vertex format, animations | done (see Step 2 below) |
+| Textures/normal maps in materials | partial: base-color textures are sampled; normal/metallic-roughness maps are loaded into `Material` but the forward shader does not sample them yet |
 | Audio / UI / AI | intentionally absent (extension points only) |
+
+## Step 2 — glTF / Blender readiness
+
+- **Vertex format**: position, normal, uv0, tangent, `uvec4` joints, `vec4`
+  weights (80 bytes, interleaved). Static meshes leave joints/weights zero.
+  `mesh.vert` / `mesh.frag` and `shadow_depth.vert` are compiled twice, with
+  and without `SKINNED`, so static and skinned draws share one pipeline.
+- **GPU skinning**: 128-bone std140 UBO (8 KiB) uploaded per skinned draw; the
+  same UBO is used by the flashlight shadow pass so shadows deform with the
+  character.
+- **Loader** (`engine/asset/GltfAsset`, cgltf 1.15 in `external/cgltf`):
+  primitives, normals/tangent generation when absent, material factors and
+  base-color/normal/metallic-roughness textures (buffer views, data URIs and
+  external files), node hierarchy with matrix decomposition, skins with
+  inverse bind matrices, animation samplers (linear/step/cubic-spline),
+  `KHR_lights_punctual`, node `extras`. Cached through `AssetLibrary`.
+- **Skinning space**: joint matrices are `inverse(meshNodeWorld) *
+  jointWorld * inverseBind` per the glTF spec. The mesh node's world is the
+  renderer's model matrix, so the two cancel; this matters for CesiumMan,
+  which sits under Z-up conversion nodes.
+- **Level conventions**: `COL_` (AABBCollider), `SPAWN_` (SpawnPoint),
+  `TRIGGER_` (TriggerVolume), extras → EntityExtras, punctual lights →
+  PointLight/SpotLight. Whole-level and prefab instantiation via
+  `LevelBuilder::instantiate` (the returned `LevelInstance` owns the asset).
+- **Animation**: `Animator` + `SkinnedMeshRenderer` components;
+  `AnimationSystem::update` runs at the frame rate. Node-local TRS poses are
+  sampled and blended (slerp for rotations), then node worlds and skin
+  matrices are built. Crossfade via node-pose blending (not matrix blending),
+  looping and one-shot clips, `finished` flag, time-based events from clip
+  extras (`footsteps`).
+- **Test content**: `assets/test/CesiumMan.glb` and `Fox.glb` load into the
+  corridor. CesiumMan is meters; Fox is authored in centimeters and its level
+  root uses a 0.012 scale. ImGui: per-animator clip combo, global playback
+  speed, bone debug draw toggle.
+- glTF is Y-up, right-handed, meters — the same as the engine, so no axis
+  conversion; see `docs/BLENDER_EXPORT.md` for the export checklist.
+
+### Step 2 known limitations
+
+- Morph-target animation and `KHR_texture_transform` are not implemented.
+- Skinned meshes are culled with their rest-pose bounds (fine for the sample
+  models; large poses could pop at the screen edge).
+- A skin bound to several mesh nodes with different transforms is only
+  correct for the first mesh node (baked into `Skeleton::meshNodeInverse`).
+- Multiple primitives each get their own Animator, so CPU evaluation is
+  duplicated per primitive (Fox: 1 primitive; acceptable at this scale).
+- Alpha modes other than OPAQUE are loaded as opaque; no transparency
+  sorting.
+- Normal mapping/metallic PBR shading is not in the forward shader yet; the
+  data is loaded and ready.
+- `COL_`/`TRIGGER_` bounds are computed at import time; they do not follow
+  animated nodes.
 
 ## Bugs fixed in the stabilization pass
 
@@ -192,6 +244,9 @@ Deliberate choices worth knowing:
 - AABB collision has no step-offset, slopes, or moving platforms; sub-step
   tunneling is only bounded by the fixed 1/60 s step.
 - The post pass is a single composite; there is no bloom/SSAO chain yet.
+- The imported test models read very dark in-game by design (ambient is
+  near-black): point the flashlight at them, or raise ambient/post exposure in
+  the F1 overlay when inspecting them.
 - `Texture::placeholder()` is a function-local static destroyed at process
   exit, after the GL context is gone (harmless today, but should become an
   engine-lifetime owned object).

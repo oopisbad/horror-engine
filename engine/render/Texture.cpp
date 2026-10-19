@@ -30,6 +30,35 @@ Texture::Texture(const std::string &path, const Params &params)
     srgb_ = params.srgb;
 }
 
+Texture::Texture(const uint8_t *encoded, size_t size, const Params &params)
+{
+    int w = 0, h = 0, channels = 0;
+    if (!encoded || size == 0) {
+        HOR_LOG_WARN_ONCE("embedded texture has no data -- using placeholder");
+        *this = Texture(GL_RGBA8, 1, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, nullptr, params);
+        const uint8_t magenta[4] = { 255, 0, 255, 255 };
+        glTextureSubImage2D(texture_, 0, 0, 0, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, magenta);
+        width_ = height_ = 1;
+        srgb_ = false;
+        return;
+    }
+    stbi_uc *pixels = stbi_load_from_memory(encoded, static_cast<int>(size), &w, &h, &channels, 4);
+    if (!pixels) {
+        HOR_LOG_WARN_ONCE("embedded texture decode failed: {} -- using placeholder",
+            stbi_failure_reason());
+        *this = Texture(GL_RGBA8, 1, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, nullptr, params);
+        const uint8_t magenta[4] = { 255, 0, 255, 255 };
+        glTextureSubImage2D(texture_, 0, 0, 0, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, magenta);
+        width_ = height_ = 1;
+        srgb_ = false;
+        return;
+    }
+    *this = Texture(GL_RGBA8, static_cast<uint32_t>(w), static_cast<uint32_t>(h), 1,
+        GL_RGBA, GL_UNSIGNED_BYTE, pixels, params);
+    stbi_image_free(pixels);
+    srgb_ = params.srgb;
+}
+
 Texture::Texture(GLenum internalFormat, uint32_t width, uint32_t height, uint32_t depth,
     GLenum format, GLenum type, const void *data, const Params &params)
 {

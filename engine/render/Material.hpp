@@ -1,5 +1,7 @@
 #pragma once
 
+#include <glm/glm.hpp>
+
 #include <memory>
 #include <string>
 
@@ -16,19 +18,28 @@ class Texture;
 //
 // Color space note: albedo stays linear; sRGB decoding happens in the texture
 // at load time when srgb=true.
+//
+// glTF import fills these from pbrMetallicRoughness. The current forward
+// shader consumes albedo/baseColorTex/roughness/emissiveStrength; metallic,
+// the normal map and the metallic-roughness map are loaded and kept for the
+// PBR shader stage (see NOTES.md).
 struct Material {
     std::string name; // debug label
     std::shared_ptr<Shader> shader;
 
     glm::vec3 albedo{0.7f, 0.7f, 0.7f};
     float roughness = 0.8f;
+    float metallic = 0.0f;
 
     // Emissive contribution is added post-integration, so a fully dark room
     // with a single emissive strip still reads as a light source.
     float emissiveStrength = 0.0f;
+    glm::vec3 emissiveColor{1.0f};
 
     float opacity = 1.0f;
-    Texture *baseColorTex = nullptr; // non-owning; owned by TextureCache
+    Texture *baseColorTex = nullptr;           // non-owning; owned by GltfModel
+    Texture *normalTex = nullptr;              // non-owning; loaded, not sampled yet
+    Texture *metallicRoughnessTex = nullptr;   // non-owning; loaded, not sampled yet
 };
 
 } // namespace horror

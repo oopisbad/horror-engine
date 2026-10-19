@@ -1,5 +1,6 @@
 #pragma once
 
+#include "asset/GltfAsset.hpp"
 #include "core/Input.hpp"
 #include "core/Time.hpp"
 #include "core/Window.hpp"
@@ -44,6 +45,7 @@ public:
     Camera &camera() { return camera_; }
     Scene &scene() { return scene_; }
     ForwardRenderer &renderer() { return renderer_; }
+    AssetLibrary &assets() { return assets_; }
 
     // Gameplay hooks ---------------------------------------------------------
     // Fixed timestep: physics/player logic. dt is exactly Config::fixedStep.
@@ -68,6 +70,7 @@ private:
     Input input_;
     Camera camera_;
     Scene scene_;
+    AssetLibrary assets_; // before renderer: GL assets die before the context
     ForwardRenderer renderer_;
     std::unique_ptr<ImGuiOverlay> imgui_;
 
