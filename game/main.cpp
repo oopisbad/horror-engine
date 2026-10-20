@@ -336,7 +336,17 @@ int runSelfTest(Application &app, EntityId player, float dt)
     // travel in every direction. Destroyed before the game starts rendering.
     EntityId pad = scene.create("selftest-pad");
     scene.transform(pad).position = { 100.0f, -0.05f, 100.0f };
-    scene.add(pad, AABBCollider{ glm::vec3(0.0f), glm::vec3(8.0f, 0.05f, 8.0f), {}, {}, true });
+    scene.add(pad, AABBCollider{ glm::vec3(0.0f), glm::vec3(16.0f, 0.05f, 16.0f), {}, {}, true });
+    // 0.2 m ledge (top at y=0.2) for the step-offset case and a 6 cm thick
+    // wall for the tunneling check.
+    // Placed well beyond the straight-line walk distance of the cases above so
+    // they stay unobstructed.
+    EntityId ledge = scene.create("selftest-ledge");
+    scene.transform(ledge).position = { 100.0f, 0.1f, 92.0f };
+    scene.add(ledge, AABBCollider{ glm::vec3(0.0f), glm::vec3(2.0f, 0.1f, 1.0f), {}, {}, true });
+    EntityId thinWall = scene.create("selftest-thin-wall");
+    scene.transform(thinWall).position = { 100.0f, 1.0f, 86.0f };
+    scene.add(thinWall, AABBCollider{ glm::vec3(0.0f), glm::vec3(2.0f, 1.0f, 0.03f), {}, {}, true });
     scene.updateWorldMatrices();
     scene.refreshColliderBounds();
 
@@ -470,6 +480,51 @@ int runSelfTest(Application &app, EntityId player, float dt)
                 && maxStep < kJumpLimit && cc && cc->grounded, detail.str());
     }
 
+    // Step offset: a 0.2 m ledge has to be walked onto, not treated as a wall.
+    {
+        const glm::vec3 approach{ 100.0f, 0.0f, 95.0f };
+        resetCharacter(app, player, approach);
+        h.held = { GLFW_KEY_W };
+        float maxStep = 0.0f;
+        glm::vec3 prev = approach;
+        for (int i = 0; i < kSteps; ++i) {
+            h.step();
+            const glm::vec3 p = scene.transform(player).position;
+            maxStep = std::max(maxStep, glm::length(p - prev));
+            prev = p;
+        }
+        const glm::vec3 end = scene.transform(player).position;
+        const CharacterController *cc = scene.find<CharacterController>(player);
+        std::ostringstream detail;
+        detail << "end=(" << end.x << "," << end.y << "," << end.z << ")"
+               << " maxStep=" << maxStep << " grounded=" << (cc && cc->grounded);
+        report("step up 0.2m", std::abs(end.y - 0.2f) < 0.01f && end.z < 93.2f
+                && maxStep < 0.35f && cc && cc->grounded, detail.str());
+    }
+
+    // Sub-step / sweep: sprint into a 6 cm wall; the body must stop at it.
+    {
+        const glm::vec3 runUp{ 100.0f, 0.0f, 89.0f };
+        resetCharacter(app, player, runUp);
+        h.held = { GLFW_KEY_W, GLFW_KEY_LEFT_SHIFT };
+        float maxStep = 0.0f;
+        glm::vec3 prev = runUp;
+        for (int i = 0; i < 200; ++i) {
+            h.step();
+            const glm::vec3 p = scene.transform(player).position;
+            maxStep = std::max(maxStep, glm::length(p - prev));
+            prev = p;
+        }
+        const glm::vec3 end = scene.transform(player).position;
+        const CharacterController *cc = scene.find<CharacterController>(player);
+        std::ostringstream detail;
+        detail << "end=(" << end.x << "," << end.y << "," << end.z << ")"
+               << " (wall face 86.03, stop ~86.31) maxStep=" << maxStep
+               << " grounded=" << (cc && cc->grounded);
+        report("thin wall", end.z > 86.30f && end.z < 86.6f && std::abs(end.y) < 0.01f
+                && maxStep < kJumpLimit && cc && cc->grounded, detail.str());
+    }
+
     // Mouse convention: right turns right, up looks up (and invert Y flips it).
     constexpr float kMouseX = 120.0f;
     auto mouseReport = [&](const char *name, bool pass, const glm::vec3 &f, float yaw,
@@ -516,6 +571,8 @@ int runSelfTest(Application &app, EntityId player, float dt)
                 + std::to_string(heldOnly) + "/" + std::to_string(releaseEdge));
     }
 
+    scene.destroy(ledge);
+    scene.destroy(thinWall);
     scene.destroy(pad);
     h.releaseAll();
     resetCharacter(app, player, { 0.0f, kFloorTopY, 1.8f });

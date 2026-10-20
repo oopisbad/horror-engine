@@ -20,6 +20,14 @@ constexpr float kGroundProbe = 0.05f;  // extra downward probe height for `groun
 // resting contact (feet exactly on a floor top) a valid block without letting
 // deep pre-existing overlap through.
 constexpr float kContactEps = 1e-4f;
+// Largest ledge the controller walks up without jumping (curbs, stair treads).
+constexpr float kStepHeight = 0.35f;
+// Collision sub-step budget: no collision pass may move the body further than
+// this, so a fast fall/run can never cross a collider between two overlap
+// tests. 8 cm is above the fixed-step walk stride (4 cm) and keeps the usual
+// step to a single pass, but bounds sprint (7.7 cm) and high-speed falls.
+constexpr float kMaxSubStep = 0.08f;
+constexpr int kMaxSubSteps = 8;
 constexpr float kBobFrequency = 9.5f;  // rad/s at full walk speed
 constexpr float kBobLateral = 0.04f;   // meters of sideways sway
 constexpr float kBobVertical = 0.03f;  // meters of vertical bounce
@@ -123,6 +131,18 @@ void CharacterSystem::step(Scene &scene, EntityId entity, const Hooks &hooks, fl
 
     glm::vec3 pushTotal(0.0f);
 
+    // True if the body (at its current pos) overlaps any solid collider.
+    auto overlapsAny = [&]() -> bool {
+        bool hit = false;
+        scene.view<AABBCollider>([&](EntityId, const AABBCollider &col) {
+            if (hit || !col.resolveCollisions)
+                return;
+            if (overlaps(playerCenter(), playerHalf(), col.worldMin, col.worldMax))
+                hit = true;
+        });
+        return hit;
+    };
+
     // Swept, axis-separated resolution.
     //
     // Only a face the player *newly crossed* on this axis may block: before
@@ -132,70 +152,129 @@ void CharacterSystem::step(Scene &scene, EntityId entity, const Hooks &hooks, fl
     // but was already inside the slab's X/Z extent, so X/Z resolution ignores
     // it (the old code pushed out of the nearest face instead, which is ~8 m
     // away for the 16x16 floor -- the "WASD teleports me" bug).
+    //
+    // The push-out target is gathered across every blocking collider and the
+    // extreme one applied once: with several stacked surfaces the result must
+    // be order-independent (landing on the highest of two steps, not on
+    // whichever entity the unordered_map happened to visit last).
     auto collideAxis = [&](int axis, float delta) -> bool {
         if (delta == 0.0f)
             return false;
+        const glm::vec3 center = playerCenter();
+        const glm::vec3 half = playerHalf();
+        const float offset = center[axis] - pos[axis]; // 0 on X/Z, half height on Y
+        const float before = center[axis] - delta;    // pre-move centre on this axis
         bool blocked = false;
+        float best = pos[axis];
         scene.view<AABBCollider>([&](EntityId, const AABBCollider &col) {
             if (!col.resolveCollisions)
                 return;
-            const glm::vec3 center = playerCenter();
-            const glm::vec3 half = playerHalf();
             // Cheap reject before computing penetration.
             if (!overlaps(center, half, col.worldMin, col.worldMax))
                 return;
-            const float before = center[axis] - delta; // pre-move centre on this axis
             float target;
             if (delta > 0.0f) {
                 if (before + half[axis] > col.worldMin[axis] + kContactEps)
                     return; // already inside this extent: not this axis' blocker
-                target = col.worldMin[axis] - half[axis];
+                target = col.worldMin[axis] - half[axis] - offset;
+                best = blocked ? std::min(best, target) : target;
             } else {
                 if (before - half[axis] < col.worldMax[axis] - kContactEps)
                     return;
-                target = col.worldMax[axis] + half[axis];
+                target = col.worldMax[axis] + half[axis] - offset;
+                best = blocked ? std::max(best, target) : target;
             }
-            // `target` is a box-centre coordinate; pos stores the feet origin,
-            // so undo the centre offset (half height on Y, zero on X/Z).
-            const float newPos = target - (center[axis] - pos[axis]);
-            pushTotal[axis] += newPos - pos[axis];
-            pos[axis] = newPos;
             blocked = true;
         });
+        if (blocked) {
+            pushTotal[axis] += best - pos[axis];
+            pos[axis] = best;
+        }
         return blocked;
     };
 
-    const float dx = cc->velocity.x * dt;
-    const float dy = cc->velocity.y * dt;
-    const float dz = cc->velocity.z * dt;
+    // Horizontal move with step-offset: when a grounded body is blocked by a
+    // low ledge, retry the same move one step-height up, then settle back down
+    // onto the surface. Falls back to the plain blocked position (pressed
+    // against the face) if there is no headroom or no surface to land on, so
+    // real walls still stop the player.
+    auto tryHorizontal = [&](int axis, float delta) -> bool {
+        if (delta == 0.0f)
+            return false;
+        const glm::vec3 start = pos;
+        pos[axis] += delta;
+        if (!collideAxis(axis, delta))
+            return false;
+        // Where the plain resolution left us (pressed against the face). Keep
+        // this for every failed step-up path so the body rests on the wall
+        // instead of a sub-step short of it.
+        const glm::vec3 blockedPos = pos;
+        if (!cc->grounded) {
+            return true; // no mid-air step-ups
+        }
 
-    pos.x += dx;
-    if (collideAxis(0, dx))
-        cc->velocity.x = 0.0f;
-    pos.z += dz;
-    if (collideAxis(2, dz))
-        cc->velocity.z = 0.0f;
-    pos.y += dy;
+        pos = start;
+        pos.y += kStepHeight;
+        if (overlapsAny()) { // too low a ceiling to lift the body
+            pos = blockedPos;
+            return true;
+        }
+        pos[axis] += delta;
+        if (collideAxis(axis, delta)) { // still walled in at step height
+            pos = blockedPos;
+            return true;
+        }
+        const float raised = pos.y;
+        const float drop = kStepHeight + kGroundProbe;
+        pos.y -= drop;
+        if (collideAxis(1, -drop))
+            return false; // stepped up and settled on the ledge
+        pos.y = raised; // nothing to stand on: don't levitate
+        pos = blockedPos;
+        return true;
+    };
 
-    const bool blockedY = collideAxis(1, dy);
-    if (blockedY) {
-        // Ground only when we were moving down; a ceiling hit must not make us
-        // think we can jump.
-        cc->grounded = dy <= 0.0f;
-        cc->velocity.y = 0.0f;
-    } else {
-        cc->grounded = false;
-        if (wasGrounded && cc->velocity.y <= 0.0f) {
-            // Walked off an edge this step: probe slightly down so tiny
-            // numerical separations don't cancel grounded state on flat floors.
-            const float beforeProbe = pos.y;
-            pos.y -= kGroundProbe;
-            if (collideAxis(1, -kGroundProbe)) {
-                cc->velocity.y = 0.0f;
-                cc->grounded = true;
-            } else {
-                pos.y = beforeProbe;
-            }
+    // ---- Sub-step integration -------------------------------------------------
+    // The whole move is split so no collision pass advances the body further
+    // than kMaxSubStep. Worth it for fast falls and for authored colliders
+    // thinner than one fixed-step stride; normal walking still runs one pass.
+    const float travel = glm::length(cc->velocity) * dt;
+    const int substeps = std::clamp(
+        static_cast<int>(std::ceil(travel / kMaxSubStep)), 1, kMaxSubSteps);
+    const float h = dt / static_cast<float>(substeps);
+
+    bool groundedThisStep = false;
+    for (int sub = 0; sub < substeps; ++sub) {
+        const float dx = cc->velocity.x * h;
+        const float dy = cc->velocity.y * h;
+        const float dz = cc->velocity.z * h;
+
+        if (tryHorizontal(0, dx))
+            cc->velocity.x = 0.0f;
+        if (tryHorizontal(2, dz))
+            cc->velocity.z = 0.0f;
+
+        pos.y += dy;
+        if (collideAxis(1, dy)) {
+            // Ground only when we were moving down; a ceiling hit must not
+            // make us think we can jump.
+            if (dy <= 0.0f)
+                groundedThisStep = true;
+            cc->velocity.y = 0.0f;
+        }
+    }
+
+    cc->grounded = groundedThisStep;
+    if (!groundedThisStep && wasGrounded && cc->velocity.y <= 0.0f) {
+        // Walked off an edge this step: probe slightly down so tiny numerical
+        // separations don't cancel grounded state on flat floors.
+        const float beforeProbe = pos.y;
+        pos.y -= kGroundProbe;
+        if (collideAxis(1, -kGroundProbe)) {
+            cc->velocity.y = 0.0f;
+            cc->grounded = true;
+        } else {
+            pos.y = beforeProbe;
         }
     }
 

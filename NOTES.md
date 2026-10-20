@@ -111,8 +111,10 @@ Deliberate choices worth knowing:
   world matrix for the light origin/axis and builds the shadow camera from it.
 - **Character controller** runs in the fixed step (1/60 s) so movement and
   collision are frame-rate independent. It is an AABB-vs-static-AABB,
-  axis-separated resolver (X, Z, then Y), feet-origin, with head bob exposed
-  on the Camera.
+  swept, axis-separated resolver (X, Z, then Y), feet-origin, with a 0.35 m
+  step-offset (walk up curbs/ledges, headroom-checked) and collision
+  sub-stepping capped at 8 cm per pass so fast movement cannot cross a
+  collider between two overlap tests. Head bob is exposed on the Camera.
 - **Input** maps semantic Actions to keys; per-key state keeps previous and
   current frame bits for pressed/held/released.
 
@@ -154,7 +156,7 @@ Deliberate choices worth knowing:
 | Camera first-person, pitch clamp, bob hook | done |
 | Low ambient, point lights, flashlight spotlight + shadows | done (point lights do not cast shadows) |
 | Framebuffer + post pass (vignette, grain, fog) | done |
-| Simple ECS, transform hierarchy, AABB collision | done (AABB only, no capsule/slopes/step-offset) |
+| Simple ECS, transform hierarchy, AABB collision | done (AABB + 0.35 m step-offset; no capsule, slopes or moving platforms) |
 | Character controller walk/sprint/crouch/gravity | done |
 | ImGui overlay (fps, frame time, camera pos, wireframe), debug draw | done |
 | Placeholder cube/plane test scene | done |
@@ -310,9 +312,9 @@ Deliberate choices worth knowing:
 - Point lights do not cast shadows (only the flashlight).
 - Normal maps are sampled but only the lit pass uses them; the shadow pass is
   depth-only, as expected.
-- AABB collision has no step-offset, slopes, or moving platforms; sub-step
-  tunneling is only bounded by the fixed 1/60 s step (step-offset and sub-step
-  protection are the next task).
+- AABB collision has no slopes or moving platforms; the step-offset is flat
+  and only applies while grounded. Sub-stepping caps movement at 8 cm per
+  collision pass (8 passes max per fixed step).
 - Collision resolution only blocks *entering* a face; a body spawned deeply
   inside geometry is not depenetrated (would need a push-to-nearest-face pass).
 - `--selftest` needs a display because Application owns the window; a truly
