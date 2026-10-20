@@ -1,6 +1,7 @@
 #include "scene/CharacterController.hpp"
 
 #include "core/Input.hpp"
+#include "debug/FlightRecorder.hpp"
 #include "render/Camera.hpp"
 #include "scene/Scene.hpp"
 
@@ -61,9 +62,16 @@ void CharacterSystem::step(Scene &scene, EntityId entity, const Hooks &hooks, fl
     //   mouse right -> turn right, mouse up -> look up.
     // Camera::forward() is (-sin yaw, *, -cos yaw), so *increasing* yaw turns
     // left; turning right therefore subtracts. Pitch is up-positive.
+    const float yawBefore = hooks.camera->yaw;
+    const float pitchBefore = hooks.camera->pitch;
     hooks.camera->yaw -= md.x;
     hooks.camera->pitch += cc->invertY ? md.y : -md.y;
     hooks.camera->clampPitch();
+    // Applied (post-clamp) look delta for the flight recorder: comparing this
+    // against the actual yaw/pitch change is what catches a look jump that no
+    // mouse movement can explain.
+    const glm::vec2 lookApplied{ hooks.camera->yaw - yawBefore,
+        hooks.camera->pitch - pitchBefore };
 
     // ---- Movement intent --------------------------------------------------
     const bool wantSprint = hooks.input->held(Action::Sprint);
@@ -104,8 +112,11 @@ void CharacterSystem::step(Scene &scene, EntityId entity, const Hooks &hooks, fl
     cc->velocity.z = horiz.z;
 
     // Jump is edge-triggered; holding space doesn't auto-bounce.
-    if (hooks.input->pressed(Action::Jump) && cc->grounded && !wantCrouch)
+    bool jumped = false;
+    if (hooks.input->pressed(Action::Jump) && cc->grounded && !wantCrouch) {
         cc->velocity.y = cc->jumpSpeed;
+        jumped = true;
+    }
 
     cc->velocity.y += kGravity * dt;
 
@@ -198,6 +209,7 @@ void CharacterSystem::step(Scene &scene, EntityId entity, const Hooks &hooks, fl
     // onto the surface. Falls back to the plain blocked position (pressed
     // against the face) if there is no headroom or no surface to land on, so
     // real walls still stop the player.
+    bool steppedUp = false;
     auto tryHorizontal = [&](int axis, float delta) -> bool {
         if (delta == 0.0f)
             return false;
@@ -227,8 +239,10 @@ void CharacterSystem::step(Scene &scene, EntityId entity, const Hooks &hooks, fl
         const float raised = pos.y;
         const float drop = kStepHeight + kGroundProbe;
         pos.y -= drop;
-        if (collideAxis(1, -drop))
+        if (collideAxis(1, -drop)) {
+            steppedUp = true;
             return false; // stepped up and settled on the ledge
+        }
         pos.y = raised; // nothing to stand on: don't levitate
         pos = blockedPos;
         return true;
@@ -244,6 +258,7 @@ void CharacterSystem::step(Scene &scene, EntityId entity, const Hooks &hooks, fl
     const float h = dt / static_cast<float>(substeps);
 
     bool groundedThisStep = false;
+    bool landedThisStep = false;
     for (int sub = 0; sub < substeps; ++sub) {
         const float dx = cc->velocity.x * h;
         const float dy = cc->velocity.y * h;
@@ -258,13 +273,17 @@ void CharacterSystem::step(Scene &scene, EntityId entity, const Hooks &hooks, fl
         if (collideAxis(1, dy)) {
             // Ground only when we were moving down; a ceiling hit must not
             // make us think we can jump.
-            if (dy <= 0.0f)
+            if (dy <= 0.0f) {
                 groundedThisStep = true;
+                if (!wasGrounded)
+                    landedThisStep = true;
+            }
             cc->velocity.y = 0.0f;
         }
     }
 
     cc->grounded = groundedThisStep;
+    bool probed = false;
     if (!groundedThisStep && wasGrounded && cc->velocity.y <= 0.0f) {
         // Walked off an edge this step: probe slightly down so tiny numerical
         // separations don't cancel grounded state on flat floors.
@@ -273,6 +292,7 @@ void CharacterSystem::step(Scene &scene, EntityId entity, const Hooks &hooks, fl
         if (collideAxis(1, -kGroundProbe)) {
             cc->velocity.y = 0.0f;
             cc->grounded = true;
+            probed = true;
         } else {
             pos.y = beforeProbe;
         }
@@ -287,28 +307,87 @@ void CharacterSystem::step(Scene &scene, EntityId entity, const Hooks &hooks, fl
 
     // ---- Head-bob ----------------------------------------------------------
     // Only while walking on ground; air/crouch damps it for readability.
+    //
+    // The amplitude is *ramped*, never switched: the waveform is sampled with
+    // the same running phase every step and multiplied by a smoothed 0..1
+    // amount, so takeoff/landing/crouch cannot put a step-sized jump into the
+    // camera. The old code drove the sine straight from a damped-to-zero
+    // offset, so landing while walking snapped up to kBobVertical (3 cm) of
+    // eye height plus roll into a single frame -- the "camera flinches when I
+    // land" report.
     const float horizSpeed = glm::length(glm::vec2(cc->velocity.x, cc->velocity.z));
-    if (cc->grounded && horizSpeed > 0.05f) {
+    const bool bobDriving = cc->grounded && horizSpeed > 0.05f;
+    if (bobDriving) {
         // Phase advances with speed so cadence feels tied to stride, not time.
         cc->bobPhase += horizSpeed * dt * kBobFrequency;
-        float amp = glm::clamp(horizSpeed / cc->sprintSpeed, 0.35f, 1.0f);
-        if (cc->crouching)
-            amp *= 0.35f;
-        // Two-beat pattern: double-frequency bounce + single sway (classic).
-        cc->bobOffset.y = -std::abs(std::sin(cc->bobPhase)) * kBobVertical * amp;
-        cc->bobOffset.x = std::cos(cc->bobPhase * 0.5f) * kBobLateral * amp;
-        cc->bobOffset.z = 0.0f;
-        cc->bobRoll = std::sin(cc->bobPhase) * kBobRollAmplitude * amp;
-    } else {
-        cc->bobOffset = glm::mix(cc->bobOffset, glm::vec3(0.0f), std::min(dt * 6.0f, 1.0f));
-        cc->bobRoll = glm::mix(cc->bobRoll, 0.0f, std::min(dt * 6.0f, 1.0f));
     }
+    cc->bobAmount = glm::mix(cc->bobAmount, bobDriving ? 1.0f : 0.0f,
+        std::min(dt * 8.0f, 1.0f));
+    float amp = glm::clamp(horizSpeed / cc->sprintSpeed, 0.35f, 1.0f);
+    if (cc->crouching)
+        amp *= 0.35f;
+    amp *= cc->bobAmount;
+    // Two-beat pattern: double-frequency bounce + single sway (classic).
+    cc->bobOffset.y = -std::abs(std::sin(cc->bobPhase)) * kBobVertical * amp;
+    cc->bobOffset.x = std::cos(cc->bobPhase * 0.5f) * kBobLateral * amp;
+    cc->bobOffset.z = 0.0f;
+    cc->bobRoll = std::sin(cc->bobPhase) * kBobRollAmplitude * amp;
+    const bool bobRestarted = bobDriving && !cc->bobDriving;
+    cc->bobDriving = bobDriving;
 
     // Camera eye = feet + eye height + bob (bob in local axis space here;
     // camera folds in roll itself -- see Camera::update).
+    noteCameraWriter("CharacterSystem");
+    notePlayerWriter("CharacterSystem");
     hooks.camera->position = xf.position + glm::vec3(0.0f, cc->eyeHeight, 0.0f) + cc->bobOffset;
     hooks.camera->bobOffset = cc->bobOffset;
     hooks.camera->bobRoll = cc->bobRoll;
+
+    // ---- flight recorder ---------------------------------------------------
+    // Always on, silent unless something discontinuous happens. This is the
+    // data source for the "camera snapped" reports (see FlightRecorder).
+    {
+        uint32_t flags = kStepNone;
+        if (landedThisStep)
+            flags |= kStepLanded;
+        if (jumped)
+            flags |= kStepJumped;
+        if (steppedUp)
+            flags |= kStepSteppedUp;
+        if (std::abs(pushTotal.x) > 1e-4f || std::abs(pushTotal.z) > 1e-4f)
+            flags |= kStepPushOut;
+        if (probed)
+            flags |= kStepGroundProbe;
+        if (bobRestarted)
+            flags |= kStepBobRestart;
+        if (substeps > 1)
+            flags |= kStepSubstepped;
+
+        StepTrace trace;
+        trace.dt = dt;
+        trace.pos = xf.position;
+        trace.vel = cc->velocity;
+        trace.push = pushTotal;
+        trace.camPos = hooks.camera->position;
+        trace.bobOffset = cc->bobOffset;
+        trace.camYaw = hooks.camera->yaw;
+        trace.camPitch = hooks.camera->pitch;
+        trace.bobRoll = cc->bobRoll;
+        trace.rawMouse = rawMouse;
+        trace.look = lookApplied;
+        trace.forwardAxis = forwardAmt;
+        trace.strafeAxis = strafeAmt;
+        trace.grounded = cc->grounded;
+        trace.sprint = wantSprint;
+        trace.crouch = wantCrouch;
+        trace.mouseCaptured = hooks.input->mouseCaptured();
+        trace.windowFocused = hooks.input->windowFocused();
+        trace.imguiMouse = hooks.input->mouseWantedByImGui;
+        trace.flags = flags;
+        trace.cameraWriter = lastCameraWriter();
+        trace.playerWriter = lastPlayerWriter();
+        FlightRecorder::get().recordStep(trace);
+    }
 
     if (hooks.logSteps) {
         HOR_LOG_INFO(

@@ -59,10 +59,46 @@ Input debugging (added in the movement/mouse pass):
   x=1.1/z=-2.4), inside the flashlight cone, clear of the crates and pillar,
   leaving the centre line walkable. They have no colliders.
 
+### Flight recorder (`engine/debug/FlightRecorder`)
+
+Always on, cheap, silent. Two ring buffers of the last ~420 records (~7 s):
+
+- **per fixed step**: body position/velocity/grounded, collision push-out,
+  camera yaw/pitch/position/bob offset/bob roll, input axes, consumed raw
+  mouse delta and the look delta actually applied, capture/focus/ImGui state,
+  condition flags (`LAND`, `JUMP`, `STEP`, `PUSH`, `PROBE`, `BOB`, `SUB`,
+  `TELEPORT`) and the tags naming the last system that wrote the camera and the
+  player transform (`CharacterSystem`, `resetCharacter`, ...).
+- **per frame**: delta, steps run, camera pose, pending mouse delta, capture /
+  focus / ImGui state, and which hotkeys fired (F1, P, O, V, Esc, F9, M).
+
+**Automatic detection.** Each step compares the new record with the previous
+one: yaw or pitch moving more than ~6 degrees beyond the applied mouse look, a
+camera position moving more than `velocity*dt + 6 cm + 0.30 m`, or the body
+moving further than its velocity explains. On a hit it logs one `[recorder]`
+WARNING with the offending numbers and writes `./debug_dump.txt` (rate limited
+to one every 0.5 s). Deliberate resets call `noteTeleport()`, so a spawn/respawn
+never looks like a bug -- those rows are flagged `TELEPORT` instead.
+
+**F9 dumps on demand** to `./debug_dump.txt` (also `gitignore`d). Press it
+immediately after a glitch. Reading the file: header first (`steps=`, `frames=`,
+`anomalies=`, `autoDumps=`), then oldest-first step rows (`t` is seconds since
+the oldest record), then frame rows. `look=` is what the mouse actually
+applied; compare it with the `yaw=`/`pitch=` columns to see a look jump, and
+check `cap`/`foc`/`gui` on the rows around the jump -- a `cap` or `foc` flip is
+a capture/focus transition, which is where camera snaps come from.
+
 ### Controls
 
 `WASD` move, mouse look (captured), `Shift` sprint, `Ctrl/C` crouch, `Space`
-jump, `F1` overlay, `P` wireframe, `O` debug draw, `V` vsync, `Esc` quit.
+jump, `F1` overlay, `P` wireframe, `O` debug draw, `V` vsync, `F9` flight
+recorder dump, `Esc` quit.
+
+Mouse capture is re-baselined on every capture change *and* on every window
+focus change: the cursor is warped by the window manager when the mode
+changes, and the follow-up position event was several hundred pixels of fake
+look delta (the camera snap). `Input::cursorPosCallback` also drops any single
+event larger than 500 px as a warp and logs it once.
 
 Mouse convention: mouse right turns right, mouse up looks up, no acceleration
 (GLFW raw mouse motion is enabled when the platform supports it). Look

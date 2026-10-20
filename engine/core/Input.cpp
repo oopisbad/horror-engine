@@ -29,6 +29,7 @@ Input::Input()
     bindings_[(size_t)Action::ToggleWireframe] = { GLFW_KEY_P };
     bindings_[(size_t)Action::ToggleDebugDraw] = { GLFW_KEY_O };
     bindings_[(size_t)Action::ToggleVsync] = { GLFW_KEY_V };
+    bindings_[(size_t)Action::DumpRecorder] = { GLFW_KEY_F9 };
     bindings_[(size_t)Action::Quit] = { GLFW_KEY_ESCAPE };
 }
 
@@ -41,6 +42,8 @@ void Input::attach(Window &window)
     glfwSetMouseButtonCallback(glfwWindow_, mouseButtonCallback);
     glfwSetCursorPosCallback(glfwWindow_, cursorPosCallback);
     glfwSetScrollCallback(glfwWindow_, scrollCallback);
+    glfwSetWindowFocusCallback(glfwWindow_, focusCallback);
+    focused_ = glfwGetWindowAttrib(glfwWindow_, GLFW_FOCUSED) != 0;
 }
 
 void Input::detach()
@@ -51,6 +54,7 @@ void Input::detach()
     glfwSetMouseButtonCallback(glfwWindow_, nullptr);
     glfwSetCursorPosCallback(glfwWindow_, nullptr);
     glfwSetScrollCallback(glfwWindow_, nullptr);
+    glfwSetWindowFocusCallback(glfwWindow_, nullptr);
     if (active_ == this)
         active_ = nullptr;
     glfwWindow_ = nullptr;
@@ -79,23 +83,77 @@ void Input::mouseButtonCallback(GLFWwindow *, int button, int action, int /*mods
         self->buttons_[button].isDown = false;
 }
 
+void Input::focusCallback(GLFWwindow *, int focused)
+{
+    Input *self = active_;
+    if (!self)
+        return;
+    const bool nowFocused = focused != 0;
+    if (nowFocused == self->focused_)
+        return;
+    self->focused_ = nowFocused;
+    // Both directions need a re-baseline: on the way out the pending delta
+    // belongs to the free-cursor era, and on the way back the pointer may sit
+    // anywhere (the WM moved/warped it while we were unfocused).
+    self->resyncMouse(nowFocused ? "focus regained" : "focus lost");
+}
+
+void Input::resyncMouse(const char *why)
+{
+    const glm::vec2 pending = mouseDelta_;
+    mouseDelta_ = glm::vec2(0.0f);
+    firstMouseSample_ = true;
+    resyncSamples_ = 2;
+    ++resyncEvents_;
+    if (glm::length(pending) > 20.0f)
+        HOR_LOG_DEBUG("mouse re-baseline ({}): dropped pending delta ({:+.1f},{:+.1f})",
+            why, pending.x, pending.y);
+}
+
 void Input::cursorPosCallback(GLFWwindow *, double x, double y)
 {
     Input *self = active_;
     if (!self)
         return;
     const glm::vec2 pos(static_cast<float>(x), static_cast<float>(y));
-    if (self->firstMouseSample_) {
-        // First callback after capturing (or at startup): no delta, because
-        // the cursor may have jumped from anywhere to the window/capture
-        // position and that would snap the camera around.
-        self->firstMouseSample_ = false;
-    } else {
-        // Accumulate: several motion events can land in one frame, and a
-        // per-event overwrite silently drops pixels (jittery, light look).
-        self->mouseDelta_ += pos - self->mousePos_;
-    }
+    const glm::vec2 delta = pos - self->mousePos_;
     self->mousePos_ = pos;
+
+    if (self->firstMouseSample_ || self->resyncSamples_ > 0) {
+        // The first callback after a capture/focus change is not movement: the
+        // cursor may have been warped from anywhere to the window/capture
+        // position. Swallow a couple of samples so the warp and the position
+        // event that follows it both fall inside the window -- swallowing only
+        // the first one let the second through as a huge delta, which is what
+        // snapped the camera to a fixed orientation (pitch clamped at +/-89).
+        if (self->resyncSamples_ > 0)
+            --self->resyncSamples_;
+        self->firstMouseSample_ = false;
+        return;
+    }
+
+    // Accumulate only captured motion: free-cursor movement is UI navigation.
+    if (!self->mouseCaptured_)
+        return;
+
+    // A single event can never be a real mouse movement at hundreds of pixels;
+    // it is a warp (cursor-mode change, WM recentre, virtual desktop switch).
+    // Applying it rotates the camera by 30-180 degrees in one step.
+    constexpr float kMaxEventDelta = 500.0f;
+    if (glm::length(delta) > kMaxEventDelta) {
+        if (self->resyncEvents_ < 8) {
+            ++self->resyncEvents_;
+            HOR_LOG_WARN(
+                "mouse warp dropped: event delta ({:+.1f},{:+.1f}) px, captured={} focused={} raw={}",
+                delta.x, delta.y, self->mouseCaptured_ ? 1 : 0,
+                self->focused_ ? 1 : 0, self->rawMouseMotion_ ? 1 : 0);
+        }
+        return;
+    }
+
+    // Several motion events can land in one frame; a per-event overwrite
+    // silently drops pixels (jittery, light look).
+    self->mouseDelta_ += delta;
 }
 
 void Input::scrollCallback(GLFWwindow *, double dx, double dy)
@@ -116,6 +174,17 @@ void Input::update()
     for (auto &b : buttons_)
         b.wasDown = b.isDown;
     scrollDelta_ = glm::vec2(0.0f);
+
+    // Focus backstop: the callback covers every real transition, but sampling
+    // here also catches a window that started unfocused (or a platform that
+    // never delivered the callback).
+    if (glfwWindow_) {
+        const bool focused = glfwGetWindowAttrib(glfwWindow_, GLFW_FOCUSED) != 0;
+        if (focused != focused_) {
+            focused_ = focused;
+            resyncMouse(focused ? "focus regained (sampled)" : "focus lost (sampled)");
+        }
+    }
 }
 
 glm::vec2 Input::consumeMouseDelta()
@@ -216,10 +285,11 @@ void Input::setMouseCaptured(bool captured)
             rawMouseMotion_ ? GLFW_TRUE : GLFW_FALSE);
     if (rawMouseMotion_)
         HOR_LOG_DEBUG("raw mouse motion enabled");
-    // Re-baseline: the first position sample after a capture change is not a
-    // movement, and any pending delta belongs to the free-cursor era.
-    firstMouseSample_ = true;
-    mouseDelta_ = glm::vec2(0.0f);
+    // Re-baseline: the cursor is warped to the window when the mode changes,
+    // so the first samples after this are not movement, and any pending delta
+    // belongs to the free-cursor era.
+    resyncMouse(captured ? "capture on" : "capture off");
+    resyncSamples_ = 3; // the warp lands after GLFW has re-enabled the cursor
 }
 
 const char *Input::actionName(Action a)
@@ -237,6 +307,7 @@ const char *Input::actionName(Action a)
     case Action::ToggleWireframe: return "ToggleWireframe";
     case Action::ToggleDebugDraw: return "ToggleDebugDraw";
     case Action::ToggleVsync: return "ToggleVsync";
+    case Action::DumpRecorder: return "DumpRecorder";
     case Action::Quit: return "Quit";
     default: return "Unknown Action";
     }

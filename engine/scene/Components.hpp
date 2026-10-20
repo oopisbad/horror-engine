@@ -143,6 +143,11 @@ struct CharacterController {
     float bobPhase = 0.0f;         // walk-cycle accumulator
     glm::vec3 bobOffset{0.0f};     // current head-bob offset for the camera
     float bobRoll = 0.0f;
+    // 0..1 fade of the head-bob amplitude. Driving the sine straight from a
+    // damped-to-zero offset put up to 3 cm of camera Y into a single step the
+    // instant a jump landed while walking (the "landing flinch").
+    float bobAmount = 0.0f;
+    bool bobDriving = false;       // bob was active last step (recorder flag)
 };
 
 } // namespace horror

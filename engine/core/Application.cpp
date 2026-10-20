@@ -1,6 +1,7 @@
 #include "core/Application.hpp"
 
 #include "anim/AnimationSystem.hpp"
+#include "debug/FlightRecorder.hpp"
 #include "debug/ImGuiOverlay.hpp"
 #include "render/Framebuffer.hpp"
 
@@ -70,6 +71,24 @@ int Application::run()
         if (onFrameUpdate)
             onFrameUpdate(frameDt);
 
+        // Flight recorder frame row: pending look delta plus the capture /
+        // focus / ImGui state that produced it. One ring slot, no allocation.
+        {
+            FrameTrace trace;
+            trace.dt = frameDt;
+            trace.steps = steps;
+            trace.camPos = camera_.position;
+            trace.camYaw = camera_.yaw;
+            trace.camPitch = camera_.pitch;
+            trace.pendingMouse = input_.mouseDelta();
+            trace.mouseCaptured = input_.mouseCaptured();
+            trace.windowFocused = input_.windowFocused();
+            trace.imguiMouse = input_.mouseWantedByImGui;
+            trace.imguiKeyboard = input_.keyboardWantedByImGui;
+            trace.cameraWriter = lastCameraWriter();
+            FlightRecorder::get().recordFrame(trace);
+        }
+
         // Animation runs at the variable frame rate (not the fixed step) so
         // playback stays smooth; gameplay decides what to play per frame.
         AnimationSystem::update(scene_, frameDt);
@@ -100,19 +119,34 @@ int Application::run()
 
 void Application::handleHotkeys()
 {
-    if (input_.pressed(Action::Quit))
+    // Every hotkey is noted for the flight recorder *before* acting, so a dump
+    // always shows what was pressed on the frame something went wrong.
+    if (input_.pressed(Action::Quit)) {
+        noteHotkey(kHotkeyQuit);
         quit();
+    }
     if (input_.pressed(Action::ToggleDebugUI)) {
+        noteHotkey(kHotkeyUI);
         showImGui = !showImGui;
         // Grab/release the cursor with the overlay so aiming stops while UI.
         input_.setMouseCaptured(!showImGui);
     }
-    if (input_.pressed(Action::ToggleWireframe))
+    if (input_.pressed(Action::ToggleWireframe)) {
+        noteHotkey(kHotkeyWireframe);
         renderer_.setWireframe(!renderer_.wireframe());
-    if (input_.pressed(Action::ToggleDebugDraw))
+    }
+    if (input_.pressed(Action::ToggleDebugDraw)) {
+        noteHotkey(kHotkeyDebugDraw);
         renderer_.setDebugDrawEnabled(!renderer_.debugDrawEnabled());
-    if (input_.pressed(Action::ToggleVsync))
+    }
+    if (input_.pressed(Action::ToggleVsync)) {
+        noteHotkey(kHotkeyVsync);
         window_.setVsync(!window_.vsync());
+    }
+    if (input_.pressed(Action::DumpRecorder)) {
+        noteHotkey(kHotkeyDump);
+        FlightRecorder::get().dump("debug_dump.txt", "F9 hotkey");
+    }
 }
 
 void Application::takeScreenshot(const std::string &path)

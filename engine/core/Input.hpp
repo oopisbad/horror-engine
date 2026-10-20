@@ -31,6 +31,7 @@ enum class Action : uint8_t {
     ToggleWireframe,
     ToggleDebugDraw,
     ToggleVsync,
+    DumpRecorder, // F9: write the flight recorder ring buffer to ./debug_dump.txt
     Quit,
     Count
 };
@@ -62,6 +63,12 @@ public:
     // --- mouse ----------------------------------------------------------------
     void setMouseCaptured(bool captured);
     bool mouseCaptured() const { return mouseCaptured_; }
+    // Window focus, sampled every frame from GLFW (and by the focus callback).
+    // Losing/regaining focus with a captured cursor used to hand the camera a
+    // huge "first" delta; Input re-baselines the cursor on every transition.
+    bool windowFocused() const { return focused_; }
+    // Cursor samples thrown away as warps/re-baselines since start (diagnostic).
+    int resyncEvents() const { return resyncEvents_; }
     // Pixels accumulated since the last consumeMouseDelta(). Negative y is up.
     glm::vec2 mouseDelta() const { return mouseDelta_; }
     // Hands the accumulated motion to the caller and clears it. Mouselook
@@ -89,6 +96,13 @@ private:
     static void mouseButtonCallback(GLFWwindow *w, int button, int action, int mods);
     static void cursorPosCallback(GLFWwindow *w, double x, double y);
     static void scrollCallback(GLFWwindow *w, double dx, double dy);
+    static void focusCallback(GLFWwindow *w, int focused);
+
+    // Drops the pending delta and re-reads the cursor position over the next
+    // few samples. Called on every capture/focus transition, because the
+    // absolute cursor position is meaningless right after either one (the
+    // window manager warps the pointer when the cursor mode changes).
+    void resyncMouse(const char *why);
 
     struct KeyState {
         bool wasDown : 1; // previous frame
@@ -113,6 +127,13 @@ private:
     glm::vec2 scrollDelta_{};
     bool firstMouseSample_ = true;
     bool rawMouseMotion_ = false;
+    bool focused_ = true;
+    // Samples to swallow after a re-baseline: a warp is usually followed by
+    // one or two more position events in the same or the next poll, and only
+    // one of them being swallowed is what produced a multi-hundred-pixel
+    // delta ("camera snaps to a fixed orientation").
+    int resyncSamples_ = 0;
+    int resyncEvents_ = 0;
 };
 
 } // namespace horror

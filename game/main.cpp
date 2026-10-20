@@ -3,6 +3,7 @@
 #include "asset/LevelBuilder.hpp"
 #include "core/Application.hpp"
 #include "core/Log.hpp"
+#include "debug/FlightRecorder.hpp"
 #include "render/Material.hpp"
 #include "render/Mesh.hpp"
 #include "scene/CharacterController.hpp"
@@ -300,9 +301,14 @@ struct InputHarness {
 };
 
 // Puts the character back on its feet with no momentum and a level camera.
+// This is a teleport: the recorder is told so an expected jump never shows up
+// as an anomaly in a dump (and the row is marked TELEPORT instead).
 void resetCharacter(Application &app, EntityId player, const glm::vec3 &feet)
 {
     Scene &scene = app.scene();
+    FlightRecorder::get().noteTeleport("resetCharacter");
+    noteCameraWriter("resetCharacter");
+    notePlayerWriter("resetCharacter");
     scene.transform(player).position = feet;
     if (CharacterController *cc = scene.find<CharacterController>(player)) {
         cc->velocity = glm::vec3(0.0f);
@@ -313,6 +319,8 @@ void resetCharacter(Application &app, EntityId player, const glm::vec3 &feet)
         cc->bobPhase = 0.0f;
         cc->bobOffset = glm::vec3(0.0f);
         cc->bobRoll = 0.0f;
+        cc->bobAmount = 0.0f;
+        cc->bobDriving = false;
     }
     Camera &cam = app.camera();
     cam.position = feet + glm::vec3(0.0f, 1.62f, 0.0f);
