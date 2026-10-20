@@ -43,11 +43,12 @@ Input debugging (added in the movement/mouse pass):
   synthetic input before the render loop. Commands: `hold <KEY[+KEY]> <steps>`,
   `release <KEY>`, `wait <steps>`, `mouse <dx> <dy>`. Keys: W A S D SPACE SHIFT
   CTRL. `hold` presses for exactly N steps, then releases.
-- `--selftest` runs the scripted assertion matrix (walk W/A/S/D, diagonal,
-  sprint, crouch, idle, jump, wall stop, mouse right/up/invert, key edges) on a
-  private platform away from the corridor and exits non-zero on failure. It
-  needs a GL window (Application owns the scene/camera), so it is scripted
-  rather than fully headless.
+- `--selftest` runs a 16-check scripted assertion matrix (walk W/A/S/D,
+  diagonal, sprint, crouch, idle, jump, corridor wall stop, 0.2 m step-offset,
+  6 cm thin-wall, mouse right/up/invert, key edges) on a private platform away
+  from the corridor and exits non-zero on failure. It needs a GL window
+  (Application owns the scene/camera), so it is scripted rather than fully
+  headless.
 
 ### Controls
 
@@ -137,11 +138,16 @@ Deliberate choices worth knowing:
   aim and the shadow camera.
 - Scene: entities, transform hierarchy, AABB colliders with world bounds,
   material/mesh pools.
-- Character controller: walk/sprint/crouch, gravity, jump, axis-separated
-  AABB collision, crouch height smoothing, head bob.
-- ImGui overlay: fps/frame time, draw stats, camera position, wireframe,
-  debug draw, vsync, mouse capture toggles, post-process controls
-  (enable/exposure/vignette/grain/fog) and ambient color/intensity.
+- Character controller: walk/sprint/crouch, gravity, jump, swept
+  axis-separated AABB collision, 0.35 m step-offset, sub-stepped sweeps,
+  crouch height smoothing, head bob.
+- Materials: base color (sRGB), tangent-space normal map and glTF
+  metallic-roughness sampling in the forward shader; missing maps fall back to
+  a renderer-owned magenta placeholder.
+- ImGui overlay: fps/frame time, draw stats, camera position, mouse-look
+  sensitivity slider + invert Y, wireframe, debug draw, vsync, mouse capture
+  toggles, post-process controls (enable/exposure/vignette/grain/fog) and
+  ambient color/intensity.
 - DebugDraw: lines, boxes, spheres (3 great circles), axes, frustums.
 - Placeholder test scene: corridor + crates + ball, two point lights,
   flashlight, procedural meshes only.
@@ -310,8 +316,6 @@ Deliberate choices worth knowing:
 ## Known issues / TODO
 
 - Point lights do not cast shadows (only the flashlight).
-- Normal maps are sampled but only the lit pass uses them; the shadow pass is
-  depth-only, as expected.
 - AABB collision has no slopes or moving platforms; the step-offset is flat
   and only applies while grounded. Sub-stepping caps movement at 8 cm per
   collision pass (8 passes max per fixed step).
@@ -323,6 +327,6 @@ Deliberate choices worth knowing:
 - The imported test models read very dark in-game by design (ambient is
   near-black): point the flashlight at them, or raise ambient/post exposure in
   the F1 overlay when inspecting them.
-- The placeholder texture is now owned by `ForwardRenderer` (destroyed while
-  the GL context is current); `Texture` has no statics left.
 - Sound, UI/gameplay menus and AI are out of scope for now.
+- The material placeholder is a `ForwardRenderer` member (no statics in
+  `Texture`); any new GL-owning singleton must follow the same rule.
