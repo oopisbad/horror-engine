@@ -54,6 +54,10 @@ public:
     glm::vec3 minBounds() const { return minBounds_; }
     glm::vec3 maxBounds() const { return maxBounds_; }
 
+    // CPU copy of the geometry, kept for the skinning probe (--debug-skin) and
+    // for any future CPU-side queries. Read-only; meshes are immutable.
+    const std::vector<Vertex> &vertices() const { return vertices_; }
+
     void bind() const;
 
     // --- procedural builders -----------------------------------------------

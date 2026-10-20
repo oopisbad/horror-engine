@@ -61,12 +61,18 @@ struct SpawnPoint {
 };
 
 // TRIGGER_ node: AABB volume (authored from the node's mesh bounds or extras).
+// Gameplay tests the player box against it each fixed step and fires an event
+// on entry; `playerInside` / `enterCount` are runtime state so the overlay can
+// show that it actually fired.
 struct TriggerVolume {
     std::string tag;
     glm::vec3 worldMin{0.0f};
     glm::vec3 worldMax{0.0f};
     bool once = false;
     bool fired = false;
+
+    bool playerInside = false; // runtime: was the player inside last step
+    int enterCount = 0;        // runtime: entries since start
 };
 
 // glTF node extras: a flat key/value string map (numbers/bools stringified).

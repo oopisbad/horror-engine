@@ -29,7 +29,7 @@ previous working program).
 ./build/game [--w N] [--h N] [--vsync on|off] [--fullscreen]
              [--frames N] [--screenshot out.tga] [--shot-frame N] [--shadow N]
              [--ui title] [--debug-input] [--script "..."] [--selftest]
-             [--test-models]
+             [--test-models] [--debug-skin] [--debug-bones] [--patrol]
 ```
 
 `--frames N` exits after N frames and `--screenshot` writes a TGA after ~30
@@ -44,13 +44,16 @@ Input debugging (added in the movement/mouse pass):
   synthetic input before the render loop. Commands: `hold <KEY[+KEY]> <steps>`,
   `release <KEY>`, `wait <steps>`, `mouse <dx> <dy>`. Keys: W A S D SPACE SHIFT
   CTRL. `hold` presses for exactly N steps, then releases.
-- `--selftest` runs an 18-check scripted assertion matrix (walk W/A/S/D,
+- `--selftest` runs a 23-check scripted assertion matrix (walk W/A/S/D,
   diagonal, sprint, crouch, idle, jump, corridor wall stop, 0.2 m step-offset,
-  6 cm thin-wall, mouse right/up/invert, key edges) on a private platform away
-  from the corridor and exits non-zero on failure. It needs a GL window
-  (Application owns the scene/camera), so it is scripted rather than fully
-  headless. The last two checks are model placement: CesiumMan's and Fox's
-  rest-pose lowest vertex must be at `kFloorTopY` (0.05 m) within 0.5 mm; the
+  6 cm thin-wall, mouse right/up/invert, key edges, landing bob continuity,
+  red-ball trigger, mouse warp guard) on a private platform away from the
+  corridor and exits non-zero on failure. It needs a GL window (Application
+  owns the scene/camera), so it is scripted rather than fully headless. The
+  last four checks are the sample models: the lowest vertex (rest pose and
+  every sampled pose of the playing clip) must sit on `kFloorTopY` (0.05 m)
+  within 1 mm, the foot/head vertex must stay within 0.30/0.60 m of the joint
+  the overlay draws, and no joint may fall outside the skinned body. The
   selftest loads the sample models even without `--test-models`.
 - `--test-models` loads `assets/test/CesiumMan.glb` and `Fox.glb` into the test
   scene. Default is off: the base scene is the procedural corridor + crates
@@ -58,6 +61,16 @@ Input debugging (added in the movement/mouse pass):
   spawn (CesiumMan left at x=-1.0/z=-2.8 facing the player, Fox right at
   x=1.1/z=-2.4), inside the flashlight cone, clear of the crates and pillar,
   leaving the centre line walkable. They have no colliders.
+- `--debug-skin` CPU-skins every vertex of the sample models with the exact
+  joint matrices uploaded to the UBO and prints, for 9 times across the clip,
+  the foot/head vertex, the joint position the skeleton overlay draws, the
+  distance between them, the lowest/highest vertex, and how many joints fall
+  outside the skinned body. This is the tool that decides "is the mesh where we
+  think it is" -- see bug 21. Implies `--test-models`.
+- `--debug-bones` turns the skeleton overlay on at startup (same as the F1
+  checkbox) so one run shows mesh + bones together.
+- `--patrol` starts the sample models walking along their facing (same as `M`);
+  their clips are in-place, so this is what makes them visibly walk.
 
 ### Flight recorder (`engine/debug/FlightRecorder`)
 
@@ -91,8 +104,8 @@ a capture/focus transition, which is where camera snaps come from.
 ### Controls
 
 `WASD` move, mouse look (captured), `Shift` sprint, `Ctrl/C` crouch, `Space`
-jump, `F1` overlay, `P` wireframe, `O` debug draw, `V` vsync, `F9` flight
-recorder dump, `Esc` quit.
+jump, `F1` overlay, `P` wireframe, `O` debug draw, `V` vsync, `M` patrol the
+sample models, `F9` flight recorder dump, `Esc` quit.
 
 Mouse capture is re-baselined on every capture change *and* on every window
 focus change: the cursor is warped by the window manager when the mode
@@ -117,11 +130,14 @@ engine/
           Time (FrameTimer + FixedStepAccumulator)
           Log (std::format logger, asserts/backtraces)
           ResourceManager (generic weak-cached ResourceCache<T>)
+  anim/   AnimationSystem (time, blending, skin matrices), Animator, Skeleton,
+          SkinDebug (CPU-skinning probe for --debug-skin and the selftests)
+  asset/  GltfAsset (cgltf loader), LevelBuilder (nodes -> entities)
   render/ Camera, Mesh, Shader, Texture, Material, Framebuffer,
           DebugDraw, Renderer (forward + shadows + post)
   scene/  Scene (components + transform hierarchy), Components,
           CharacterController (fixed-step character *system*)
-  debug/  ImGuiOverlay
+  debug/  ImGuiOverlay, FlightRecorder (ring buffer + anomaly dumps)
 game/main.cpp   test scene construction + fixed-step wiring
 shaders/        mesh (lit), shadow_depth, debug, post (fullscreen composite)
 external/       glad (gl 4.5), stb
@@ -384,6 +400,90 @@ Deliberate choices worth knowing:
     now snaps the root from measured rest-pose world bounds, and the
     `--selftest` floor checks guard both models.
 
+21. **The skeleton overlay did not line up with the skinned mesh** (bug 1).
+    `Animator::jointWorldPositions` stored `nodeWorld[3]` -- the joint origin
+    in *glTF scene space* -- and the debug draw multiplied it by the entity's
+    world matrix (level root * mesh-node chain). The skinned vertices, on the
+    other hand, go through `meshNodeInverse * jointWorld * inverseBind`, i.e.
+    mesh-node space. The two only agree when the mesh node's world is identity.
+    CesiumMan's mesh node sits under a Z-up conversion node and an armature
+    node (both authored as `matrix` nodes), so the overlay drew a skeleton
+    rotated ~90 degrees and displaced: measured with `--debug-skin`, the head
+    joint was **1.85 m** from the head vertex, the foot joint dropped to
+    y=-0.26 (under the floor), and **all 19 joints** were outside the skinned
+    body. Fox was unaffected (its mesh node is a scene root with an identity
+    transform) -- which is why only one model looked broken at a time. Fix: the
+    joint position is now built in mesh-node space
+    (`meshNodeInverse * jointWorld * origin`), the same space as the skin
+    matrices, so multiplying by the entity world matrix puts it exactly where
+    the vertices are. After the fix: 0 joints outside the body, foot/head
+    offsets 0.03-0.15 m / 0.32-0.34 m (the ankle-to-sole and neck-to-crown
+    distances, constant because they are rigid). `--debug-skin` prints both
+    numbers, and the selftest asserts them for both models.
+22. **Feet sank through the floor during the walk clip** (bug 1, part 2).
+    Floor placement used the rest-pose bounds, but the walk lowers the planted
+    foot ~1-2.6 cm below the bind pose (hips bob, ankle rotates). Placement is
+    now animation-aware: `levelLowestAnimatedY` CPU-skins 24 poses across the
+    playing clip and lifts the root by the *lowest* one, so no sampled pose
+    intersects the slab (verified per pose in the selftest, tolerance 1 mm).
+23. **The camera flinched on landing** (bug 2). Not the ball: the head bob.
+    `bobOffset` is damped to zero while airborne, and the old code drove the
+    sine straight from it the instant `grounded` came back, so the strongest
+    
+    single-step discontinuity was up to `kBobVertical` (3 cm) of eye height
+    plus roll -- at whatever phase the walk happened to resume. The amplitude
+    is now ramped (`CharacterController::bobAmount`, 8/s) and the waveform is
+    sampled with a continuous phase, so the per-step camera motion stays at
+    walk-bob level: measured 15.4 mm (instant restart, old) vs 2.0 mm (ramp) on
+    the landing step, 5.6 mm at worst over the whole jump. The "landing bob"
+    selftest walks, jumps and lands at the red ball and asserts that the camera
+    never moves more than 10 mm/step beyond what the feet do.
+24. **The camera could snap to a fixed orientation** (bug 3). Mouse capture is
+    a cursor-mode change, and the window manager warps the pointer; GLFW then
+    delivers the *old* position and the warped position as two separate motion
+    events. The old code swallowed only the first one, so the second arrived as
+    a 500-1500 px "delta" -- 60+ degrees of yaw, and pitch pinned at its +/-89
+    degree clamp, which reads as "the same fixed orientation" every time.
+    Focus loss/regain did the same thing (the pointer moves while unfocused and
+    no re-baseline happened at all). Fixes: `Input` now tracks window focus
+    (focus callback + a per-frame `GLFW_FOCUSED` backstop) and re-baselines on
+    both focus and capture transitions, swallowing *three* samples instead of
+    one; any single cursor event over 500 px is dropped as a warp and counted
+    (`Input::warpEvents`). `firstMouseSample_` alone was exactly the bug. The
+    selftest drives the real cursor path (`Input::simulateCursorMove`) and
+    asserts resync/warp deltas never reach the consumer while ordinary motion
+    does; the flight recorder flags any remaining unexplained yaw/pitch/body
+    jump and dumps automatically. If it ever happens again: press **F9** and
+    read `debug_dump.txt` (see the recorder section above).
+25. **The red circle on the floor did nothing** (bug 2). It is the procedural
+    `red-ball` entity: a 0.3 m UV sphere with albedo `(0.7, 0.1, 0.1)` resting
+    on the slab at `(-0.8, 0.3, -1.5)`. It had **no collider and no trigger**, so
+    it was a purely visual prop -- walking through it could not do anything,
+    and the "flinch" seen while standing on it was the generic landing bob.
+    It now carries a `TriggerVolume` sized from its own mesh bounds; gameplay
+    fires an edge-triggered enter event (`[trigger] entered 'red-ball' (1x)` in
+    the console, `triggers:` block in the F1 overlay, blue box in the `O`
+    debug draw that brightens while the player stands inside).
+
+### Are the sample walk cycles supposed to stay in place?
+
+Yes -- verified from the clip data, not by eye. Both clips animate only joint
+rotations plus a small hip bob; there is no root translation channel that
+would move the model through the world:
+
+- Fox `Walk` (0.708 s): hip translation x in [-1.02, +1.23] cm, z in
+  [40.05, 42.10] cm -- an oscillation around the bind pose, net travel 0.
+- CesiumMan (2.0 s): torso joint z in [0.640, 0.711] m, y in [-0.030, -0.020]
+  -- the stride bob, no forward motion.
+
+The animator time does advance (the `--debug-skin` samples show different
+vertex positions per time, and the lowest vertex moves through the cycle), so
+"frozen in place" was the in-place clip, not a dropped channel. To make them
+visibly walk, press `M` (or start with `--patrol`): gameplay translates each
+level root +/-0.5 m along the model's own facing at 0.6 m/s (CesiumMan) and
+0.45 m/s (Fox), turning around at the ends. Patrolling is gameplay moving a
+transform; nothing about the skinning changes.
+
 ## Known issues / TODO
 
 - Point lights do not cast shadows (only the flashlight).
@@ -397,14 +497,21 @@ Deliberate choices worth knowing:
 - The post pass is a single composite; there is no bloom/SSAO chain yet.
 - The imported test models read very dark in-game by design (ambient is
   near-black): point the flashlight at them, or raise ambient/post exposure in
-  the F1 overlay when inspecting them.
+  the F1 overlay when inspecting them. `--debug-bones` + `O` (debug draw) makes
+  the skeleton and the red-ball trigger box visible without touching lighting.
 - Screenshots are written vertically flipped: `takeScreenshot` reverses the
   GL rows into top-down order but leaves the TGA origin descriptor at 0
   (bottom-left). The pixel data is correct top-down, so viewing tools show it
   upside down; flip on load or set `header[17] = 0x20` to fix properly.
-- Floor snapping uses the rest pose by design; a clip whose pose drops a foot
-  below the bind pose can still poke through the slab (CesiumMan's idle does
-  not).
+- Floor snapping now samples 24 poses of the clip *that is playing at spawn*.
+  Switching to another clip afterwards (e.g. Fox `Run`) can dip below the slab
+  again, because placement is not re-run per clip. Re-snap from `--debug-skin`
+  numbers if a shorter/looser clip is added.
+- Trigger volumes are static AABBs computed at setup; a trigger attached to a
+  moving node (or a moving model) does not follow it.
+- The mouse warp guard drops any single cursor event over 500 px. A genuine
+  flick that large in one poll is not distinguishable from a warp; the event is
+  dropped and counted (`Input::warpEvents`) rather than applied.
 - Sound, UI/gameplay menus and AI are out of scope for now.
 - The material placeholder is a `ForwardRenderer` member (no statics in
   `Texture`); any new GL-owning singleton must follow the same rule.

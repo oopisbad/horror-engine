@@ -506,6 +506,13 @@ void ForwardRenderer::drawDebugData(Scene &scene, Camera &camera)
     scene.view<AABBCollider>([&](EntityId id, const AABBCollider &col) {
         debugDraw_->addBox(col.worldMin, col.worldMax, glm::vec3(0.2f, 1.0f, 0.4f));
     });
+    // Trigger volumes (blue, brighter while the player is inside): makes it
+    // obvious what "the red circle" is and whether it fired.
+    scene.view<TriggerVolume>([&](EntityId, const TriggerVolume &trigger) {
+        const glm::vec3 color = trigger.playerInside ? glm::vec3(0.3f, 0.7f, 1.0f)
+                                                    : glm::vec3(0.15f, 0.3f, 0.8f);
+        debugDraw_->addBox(trigger.worldMin, trigger.worldMax, color);
+    });
 
     // Skeleton overlay (cyan bones, yellow joints). Joints come from the
     // Animator's last evaluated pose, in model space, so the entity's world

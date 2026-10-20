@@ -1,4 +1,5 @@
 #include "anim/Animator.hpp"
+#include "anim/SkinDebug.hpp"
 #include "asset/GltfAsset.hpp"
 #include "asset/LevelBuilder.hpp"
 #include "core/Application.hpp"
@@ -109,11 +110,23 @@ void buildTestScene(Application &app)
     // and far wall obvious at a glance when running the scene.
     wall("pillar", { -0.95f, 1.0f, -4.6f }, { 0.25f, 1.0f, 0.25f }, { 0.36f, 0.34f, 0.37f });
 
-    // A ball demonstrating the sphere builder (also a collider).
+    // The red sphere -- "the red circle on the floor" from the bug reports.
+    // It is a render-only prop: 0.3 m radius at y=0.3 (resting on the slab) with
+    // NO collider, so walking through it did nothing at all. It now carries a
+    // TriggerVolume so stepping onto it fires an event (logged + shown in the
+    // F1 overlay), which makes the report testable without guessing.
     {
-        EntityId e = scene.create("ball");
+        EntityId e = scene.create("red-ball");
         scene.add(e, MeshRenderer{ ball, mat({ 0.7f, 0.1f, 0.1f }, 0.4f), true, true });
         scene.transform(e).position = { -0.8f, 0.3f, -1.5f };
+        TriggerVolume trigger;
+        trigger.tag = "red-ball";
+        // AABB from the sphere's own bounds, so the volume always matches the
+        // mesh if the radius or position changes.
+        const glm::vec3 c = scene.transform(e).position;
+        trigger.worldMin = c + ball->minBounds();
+        trigger.worldMax = c + ball->maxBounds();
+        scene.add(e, std::move(trigger));
     }
 
     // Point lights: warm key light in the corridor, red accent in the far end.
@@ -180,13 +193,43 @@ bool levelWorldBounds(Scene &scene, const LevelInstance &level,
     return any;
 }
 
+// Sampling density for animation-aware placement and its self-test. Kept in
+// one constant so the check and the snap measure exactly the same poses.
+constexpr int levelSkinSamples = 24;
+
+// Lowest world Y of a level across its *animated* poses, not just the rest
+// pose. A walk clip lowers the planted foot ~1 cm below the bind pose (the
+// hips bob and the ankle rotates), so snapping from the rest pose lets the
+// feet poke through the floor during the cycle. Skinned meshes are CPU-skinned
+// at a handful of clip times here; static meshes use their rest-pose corners.
+float levelLowestAnimatedY(Scene &scene, const LevelInstance &level, float &restY)
+{
+    restY = 0.0f;
+    glm::vec3 mn(0.0f), mx(0.0f);
+    if (!levelWorldBounds(scene, level, mn, mx))
+        return 0.0f;
+    restY = mn.y;
+    float lowest = mn.y;
+    for (EntityId id : level.meshEntities) {
+        if (!scene.find<SkinnedMeshRenderer>(id))
+            continue;
+        // Dense enough to catch the deepest foot dip between keyframes; only
+        // runs at spawn, so 24 poses of a few thousand vertices is free.
+        const std::vector<SkinSample> samples = sampleSkin(scene, id, levelSkinSamples);
+        for (const SkinSample &s : samples)
+            lowest = std::min(lowest, s.lowestY);
+    }
+    return lowest;
+}
+
 // Feet on the floor: offsets the level ROOT (in world/parent space) so the
-// lowest rest-pose vertex sits exactly on `floorY`. An authored spawn height
-// alone is not enough -- it assumes each model's origin is at its feet, which
-// is exactly the assumption that sank both samples once the root transform was
-// lost (NOTES bug 20). CesiumMan's mesh lives under Z-up conversion nodes and
-// the Fox is authored in centimeters with a 0.012 root scale, so the evaluated
-// hierarchy is the only reliable source for the offset.
+// lowest vertex sits exactly on `floorY` -- rest pose AND every sampled pose
+// of the playing clip. An authored spawn height alone is not enough: it
+// assumes each model's origin is at its feet, which is exactly the assumption
+// that sank both samples once the root transform was lost (NOTES bug 20).
+// CesiumMan's mesh lives under Z-up conversion nodes and the Fox is authored in
+// centimeters with a 0.012 root scale, so the evaluated hierarchy is the only
+// reliable source for the offset.
 float snapLevelToFloor(Scene &scene, LevelInstance &level, float floorY)
 {
     if (!scene.valid(level.root)) {
@@ -199,12 +242,15 @@ float snapLevelToFloor(Scene &scene, LevelInstance &level, float floorY)
         HOR_LOG_WARN("floor snap: level '{}' has no mesh bounds", scene.name(level.root));
         return 0.0f;
     }
-    const float lift = floorY - mn.y;
+    float restY = mn.y;
+    const float lowest = levelLowestAnimatedY(scene, level, restY);
+    const float lift = floorY - lowest;
     scene.transform(level.root).position.y += lift;
     scene.updateWorldMatrices();
     HOR_LOG_INFO(
-        "level '{}': rest bbox y [{:.3f}, {:.3f}] x [{:.3f}, {:.3f}] -> lifted {:.3f} m onto floor {:.3f}",
-        scene.name(level.root), mn.y, mx.y, mn.x, mx.x, lift, floorY);
+        "level '{}': rest bbox y [{:.3f}, {:.3f}] x [{:.3f}, {:.3f}] animated lowest {:.3f} "
+        "(rest {:.3f}) -> lifted {:.3f} m onto floor {:.3f}",
+        scene.name(level.root), mn.y, mx.y, mn.x, mx.x, lowest, restY, lift, floorY);
     return lift;
 }
 
@@ -238,6 +284,86 @@ void spawnGltfLevel(Application &app, const char *path, const glm::vec3 &positio
 
     // Placement is bounds-driven: the authored spawn height is only a hint.
     snapLevelToFloor(app.scene(), instance, floorY);
+}
+
+// ---- gameplay systems --------------------------------------------------------
+
+// Fires when the player's body box enters a TriggerVolume. Edge-triggered on
+// entry (so standing inside does not spam) and cheap: one AABB test per
+// trigger per fixed step.
+void updateTriggers(Application &app, EntityId player)
+{
+    Scene &scene = app.scene();
+    const CharacterController *cc = scene.find<CharacterController>(player);
+    if (!cc)
+        return;
+    const glm::vec3 feet = scene.transform(player).position;
+    const glm::vec3 half(cc->radius, cc->currentHeight * 0.5f, cc->radius);
+    const glm::vec3 center = feet + glm::vec3(0.0f, half.y, 0.0f);
+    scene.view<TriggerVolume>([&](EntityId, TriggerVolume &trigger) {
+        const bool inside = glm::all(glm::lessThan(center - half, trigger.worldMax))
+            && glm::all(glm::greaterThan(center + half, trigger.worldMin));
+        if (inside && !trigger.playerInside) {
+            ++trigger.enterCount;
+            trigger.playerInside = true;
+            trigger.fired = true;
+            HOR_LOG_INFO("[trigger] entered '{}' ({}x)", trigger.tag, trigger.enterCount);
+        } else if (!inside && trigger.playerInside) {
+            trigger.playerInside = false;
+            HOR_LOG_DEBUG("[trigger] left '{}'", trigger.tag);
+        }
+    });
+}
+
+// One patrol-able level root: the sample clips are in-place (no root motion),
+// so walking is only visible if gameplay translates the root. The path is a
+// straight line along the model's own facing, oscillating +/- `amplitude`;
+// phase 0 is the authored position, so enabling patrol never teleports it.
+struct PatrolUnit {
+    EntityId root = 0;
+    glm::vec3 basePos{0.0f};
+    glm::vec3 dir{0.0f, 0.0f, -1.0f};
+    float baseYaw = 0.0f;
+    float amplitude = 0.5f;
+    float speed = 0.5f; // m/s along the path
+    float phase = 0.0f;
+};
+
+void updatePatrol(Scene &scene, std::vector<PatrolUnit> &units, float dt, bool enabled)
+{
+    if (!enabled || dt <= 0.0f)
+        return;
+    for (PatrolUnit &unit : units) {
+        if (!scene.valid(unit.root))
+            continue;
+        unit.phase += (unit.speed / std::max(unit.amplitude, 0.05f)) * dt;
+        const float offset = unit.amplitude * std::sin(unit.phase);
+        // Travel reverses at the extremes, where the speed is ~0: flip the
+        // facing there so the model turns around instead of moonwalking.
+        const float travel = std::cos(unit.phase) >= 0.0f ? 1.0f : -1.0f;
+        Transform &t = scene.transform(unit.root);
+        t.position = unit.basePos + unit.dir * offset;
+        t.rotation = glm::angleAxis(unit.baseYaw + (travel > 0.0f ? 0.0f : glm::pi<float>()),
+            glm::vec3(0.0f, 1.0f, 0.0f));
+    }
+}
+
+// --debug-skin: CPU-skin every vertex of a model and compare the foot/head
+// vertices against the joint positions the bone debug overlay draws. Prints
+// the numeric offset per animation time; this is the data that decides whether
+// the mesh and the skeleton really agree (they do not, if the offset swings).
+void debugSkinReport(Application &app, const LevelInstance &level, const char *label, int samples)
+{
+    app.scene().updateWorldMatrices();
+    bool any = false;
+    for (EntityId id : level.meshEntities) {
+        if (!app.scene().find<SkinnedMeshRenderer>(id))
+            continue;
+        any = true;
+        printSkinReport(app.scene(), std::string(label) + ":" + app.scene().name(id), id, samples);
+    }
+    if (!any)
+        HOR_LOG_WARN("--debug-skin: level '{}' has no skinned meshes", label);
 }
 
 // ---- scripted input / self-test ---------------------------------------------
@@ -649,9 +775,120 @@ int runSelfTest(Application &app, EntityId player, float dt,
                 + std::to_string(heldOnly) + "/" + std::to_string(releaseEdge));
     }
 
-    // Test models: the rest-pose lowest vertex must sit on the floor slab's
-    // top face. This is the regression check for the sunk-models bug: spawning
-    // at the slab height ignored each model's own origin/axis/scale.
+    // Landing flinch: the camera eye is feet + eye height + head bob, so the
+    // only thing that can jump on landing is the bob. It used to restart from
+    // a damped-to-zero offset and put up to kBobVertical (3 cm) into a single
+    // step the instant a jump landed while walking. Measured here: instant
+    // restart = 15.4 mm of extra camera motion on the landing step, ramped
+    // amplitude = 2.0 mm (and 5.6 mm at worst over the whole jump, which is
+    // just the normal walk bob at 2.4 m/s). Threshold 10 mm separates them.
+    {
+        // Run it at the red ball, i.e. the spot from the bug report ("jump
+        // while standing on the circle and land"). The ball has no collider,
+        // so the floor there is the corridor slab like anywhere else: the
+        // flinch was the head bob restarting, not the prop.
+        resetCharacter(app, player, { -0.8f, kFloorTopY, -1.3f });
+        h.held = { GLFW_KEY_W };
+        for (int i = 0; i < 30; ++i) // settle into a walk; bob is driven
+            h.step();
+        h.held = { GLFW_KEY_W, GLFW_KEY_SPACE };
+        h.step(); // jump
+        h.held = { GLFW_KEY_W };
+
+        float maxExtra = 0.0f;
+        float atLanding = 0.0f;
+        float prevCamY = cam.position.y;
+        float prevFeetY = scene.transform(player).position.y;
+        bool airborne = true;
+        for (int i = 0; i < 90; ++i) {
+            h.step();
+            const CharacterController *cc = scene.find<CharacterController>(player);
+            const float camY = cam.position.y;
+            const float feetY = scene.transform(player).position.y;
+            const float extra = std::abs((camY - prevCamY) - (feetY - prevFeetY));
+            maxExtra = std::max(maxExtra, extra);
+            if (airborne && cc && cc->grounded) {
+                atLanding = extra; // the landing step itself
+                airborne = false;
+            }
+            prevCamY = camY;
+            prevFeetY = feetY;
+        }
+        std::ostringstream detail;
+        detail << "maxCameraExtraPerStep=" << maxExtra * 1000.0f << " mm landingStep="
+               << atLanding * 1000.0f << " mm";
+        report("landing bob", maxExtra < 0.010f && atLanding < 0.010f, detail.str());
+        h.held.clear();
+    }
+
+    // Trigger: the red ball used to be inert (no collider, no trigger), so
+    // "walking over the red circle does nothing". It must now fire exactly one
+    // enter event while standing on it, not one per step.
+    {
+        EntityId ballTrigger = kInvalidEntity;
+        scene.view<TriggerVolume>([&](EntityId id, TriggerVolume &t) {
+            if (t.tag == "red-ball")
+                ballTrigger = id;
+        });
+        if (ballTrigger == kInvalidEntity) {
+            report("red-ball trigger", false, "no TriggerVolume tagged red-ball");
+        } else {
+            TriggerVolume *tv = scene.find<TriggerVolume>(ballTrigger);
+            tv->enterCount = 0;
+            tv->playerInside = false;
+            tv->fired = false;
+            resetCharacter(app, player, { -0.8f, kFloorTopY, 0.2f });
+            h.held = { GLFW_KEY_W };
+            for (int i = 0; i < 38; ++i) { // walk onto the ball (z ~ -1.3)
+                h.step();
+                updateTriggers(app, player);
+            }
+            h.held.clear();
+            for (int i = 0; i < 20; ++i) { // stand on it: no re-fire
+                h.step();
+                updateTriggers(app, player);
+            }
+            const glm::vec3 end = scene.transform(player).position;
+            std::ostringstream detail;
+            detail << "end=(" << end.x << "," << end.y << "," << end.z << ")"
+                   << " enters=" << tv->enterCount << " inside=" << (tv->playerInside ? 1 : 0)
+                   << " volume x[" << tv->worldMin.x << "," << tv->worldMax.x << "]";
+            report("red-ball trigger", tv->enterCount == 1 && tv->playerInside, detail.str());
+            h.held.clear();
+        }
+    }
+
+    // Mouse warp guard: a cursor sample can never reach the camera right after
+    // a capture/focus change, nor as a single warp-sized event. This is the
+    // "camera snaps to a fixed orientation" regression -- a 1000+ px warp is
+    // ~60 degrees of yaw and pins the pitch at its +/-89 clamp.
+    {
+        Input &in = app.input();
+        const int warpsBefore = in.warpEvents();
+        in.setMouseCaptured(false);
+        in.setMouseCaptured(true); // re-baseline: next 3 samples are swallowed
+        in.simulateCursorMove({ 960.0f, 540.0f }); // the capture warp itself
+        in.simulateCursorMove({ 962.0f, 541.0f });
+        in.simulateCursorMove({ 963.0f, 541.0f });
+        const glm::vec2 afterResync = in.consumeMouseDelta();
+        in.simulateCursorMove({ 973.0f, 546.0f }); // +10/+5 px: real motion
+        const glm::vec2 real = in.consumeMouseDelta();
+        in.simulateCursorMove({ 2500.0f, -800.0f }); // 1500 px jump: warp
+        const glm::vec2 warp = in.consumeMouseDelta();
+        const bool pass = glm::length(afterResync) < 1e-4f
+            && std::abs(real.x - 10.0f) < 1e-3f && std::abs(real.y - 5.0f) < 1e-3f
+            && glm::length(warp) < 1e-4f && in.warpEvents() > warpsBefore;
+        std::ostringstream detail;
+        detail << "resyncDelta=" << glm::length(afterResync) << " realDelta=(" << real.x
+               << "," << real.y << ") warpDelta=" << glm::length(warp)
+               << " warpsRejected=" << in.warpEvents();
+        report("mouse warp guard", pass, detail.str());
+    }
+
+    // Test models: the lowest vertex must sit on the floor slab's top face --
+    // rest pose *and* while the clip plays. Regression check for the
+    // sunk-models bug (placement ignored each model's origin/axis/scale) and
+    // for the walk clip dropping the planted foot below the bind pose.
     auto reportModelFloor = [&](const char *name, const LevelInstance &level) {
         if (!scene.valid(level.root)) {
             report(name, false, "model not instantiated");
@@ -663,14 +900,59 @@ int runSelfTest(Application &app, EntityId player, float dt,
             report(name, false, "no mesh bounds");
             return;
         }
-        const float error = mn.y - kFloorTopY;
+        float restY = mn.y;
+        const float lowest = levelLowestAnimatedY(scene, level, restY);
+        const float error = lowest - kFloorTopY;
         std::ostringstream detail;
-        detail << "lowest_y=" << mn.y << " floor=" << kFloorTopY
-               << " (error " << error * 1000.0f << " mm) top_y=" << mx.y;
-        report(name, std::abs(error) < 5e-4f, detail.str());
+        detail << "lowest_y=" << lowest << " (rest " << restY << ") floor=" << kFloorTopY
+               << " error=" << error * 1000.0f << " mm top_y=" << mx.y;
+        report(name, std::abs(error) < 1e-3f, detail.str());
+    };
+
+    // The skeleton the debug overlay draws must live in the same space as the
+    // skinned vertices: CPU-skin the foot/head vertex with the matrices the
+    // renderer uploads and compare against the joint position the overlay
+    // draws. A wrong joint space (the mesh node's inverse not applied) showed
+    // up as 1.85 m of head offset on CesiumMan.
+    auto reportModelSkin = [&](const char *name, const LevelInstance &level) {
+        if (!scene.valid(level.root)) {
+            report(name, false, "model not instantiated");
+            return;
+        }
+        scene.updateWorldMatrices();
+        float maxFoot = 0.0f, maxHead = 0.0f, minLow = std::numeric_limits<float>::max();
+        int samples = 0;
+        int worstOutside = 0;
+        for (EntityId id : level.meshEntities) {
+            if (!scene.find<SkinnedMeshRenderer>(id))
+                continue;
+            // Same density the placement used, so "no foot below the floor at
+            // any sampled pose" actually covers the deepest part of the cycle.
+            for (const SkinSample &s : sampleSkin(scene, id, levelSkinSamples)) {
+                maxFoot = std::max(maxFoot, s.footOffset);
+                maxHead = std::max(maxHead, s.headOffset);
+                minLow = std::min(minLow, s.lowestY);
+                worstOutside = std::max(worstOutside, s.jointsOutside);
+                ++samples;
+            }
+        }
+        if (samples == 0) {
+            report(name, false, "no skinned samples");
+            return;
+        }
+        std::ostringstream detail;
+        detail << "samples=" << samples << " maxFootOffset=" << maxFoot
+               << " maxHeadOffset=" << maxHead << " minLowestY=" << minLow
+               << " jointsOutside=" << worstOutside << " (floor " << kFloorTopY << ")";
+        report(name,
+            maxFoot < 0.30f && maxHead < 0.60f && minLow > kFloorTopY - 1e-3f
+                && worstOutside == 0,
+            detail.str());
     };
     reportModelFloor("CesiumMan floor", cesiumMan);
     reportModelFloor("Fox floor", fox);
+    reportModelSkin("CesiumMan skin", cesiumMan);
+    reportModelSkin("Fox skin", fox);
 
     scene.destroy(ledge);
     scene.destroy(thinWall);
@@ -700,6 +982,9 @@ int main(int argc, char **argv)
     bool selftest = false;   // --selftest: scripted movement/mouse assertions
     bool testModels = false; // --test-models: load CesiumMan/Fox sample assets
     bool debugInput = false; // --debug-input: per-step/per-frame input trace
+    bool debugSkin = false;  // --debug-skin: CPU-skin and compare against bones
+    bool debugBones = false; // --debug-bones: show the skeleton overlay at start
+    bool startPatrol = false; // --patrol: walk the sample models immediately
     for (int i = 1; i < argc; ++i) {
         const std::string a = argv[i];
         auto value = [&]() -> const char * { return i + 1 < argc ? argv[++i] : ""; };
@@ -729,6 +1014,12 @@ int main(int argc, char **argv)
             testModels = true;
         else if (a == "--debug-input")
             debugInput = true;
+        else if (a == "--debug-skin")
+            debugSkin = true;
+        else if (a == "--debug-bones")
+            debugBones = true;
+        else if (a == "--patrol")
+            startPatrol = true;
     }
 
     Application app{ cfg };
@@ -743,7 +1034,7 @@ int main(int argc, char **argv)
     // floor-snap assertions.
     LevelInstance cesiumMan;
     LevelInstance fox;
-    if (testModels || selftest) {
+    if (testModels || selftest || debugSkin) {
         // Flanking the corridor just ahead of the spawn: inside the flashlight
         // cone and unobstructed (the far end is hidden behind crate-3/pillar),
         // while the centre line between them stays walkable. The y in these
@@ -755,6 +1046,28 @@ int main(int argc, char **argv)
         // so its level root carries the scale. CesiumMan is already in meters.
         spawnGltfLevel(app, "test/Fox.glb", { 1.1f, 0.0f, -2.4f }, 165.0f, fox,
             "Walk", 0.012f);
+    }
+
+    // Patrol data for the sample models. Their clips are in-place by design
+    // (no root-motion channel: see NOTES), so 'M' translates the level root
+    // along the model's facing to make the walk readable in the world.
+    std::vector<PatrolUnit> patrolUnits;
+    bool patrolEnabled = startPatrol;
+    {
+        const LevelInstance *levels[] = { &cesiumMan, &fox };
+        const float speeds[] = { 0.6f, 0.45f };
+        for (size_t i = 0; i < 2; ++i) {
+            if (!app.scene().valid(levels[i]->root))
+                continue;
+            PatrolUnit unit;
+            unit.root = levels[i]->root;
+            const Transform &t = app.scene().transform(unit.root);
+            unit.basePos = t.position;
+            unit.baseYaw = glm::eulerAngles(t.rotation).y;
+            unit.dir = { -std::sin(unit.baseYaw), 0.0f, -std::cos(unit.baseYaw) };
+            unit.speed = speeds[i];
+            patrolUnits.push_back(unit);
+        }
     }
 
     // --- fixed-step gameplay ------------------------------------------------
@@ -770,6 +1083,19 @@ int main(int argc, char **argv)
                 flashlight = static_cast<EntityId>(i);
         }
     }
+    if (debugSkin) {
+        // Data first: measure the two paths (skinned vertices from the UBO
+        // matrices vs. the joint positions the skeleton overlay draws) across
+        // the whole clip before touching anything.
+        debugSkinReport(app, cesiumMan, "CesiumMan", 9);
+        debugSkinReport(app, fox, "Fox", 9);
+    }
+
+    // The skeleton overlay is an ImGui toggle; expose it from the command line
+    // too so a single run shows mesh + bones at the same animation time.
+    if (debugBones)
+        app.renderer().setDrawBones(true);
+
     CharacterSystem::Hooks hooks{ &app.camera(), &app.input(), debugInput };
 
     // Scripted runs happen before the render loop; the scene's static colliders
@@ -785,6 +1111,8 @@ int main(int argc, char **argv)
 
     app.onFixedStep = [&](float dt) {
         CharacterSystem::step(app.scene(), player, hooks, dt);
+        updatePatrol(app.scene(), patrolUnits, dt, patrolEnabled);
+        updateTriggers(app, player);
 
         // Flashlight rides the camera: same position + light offset, same
         // orientation basis. (The renderer aims it at the camera basis too;
@@ -805,9 +1133,18 @@ int main(int argc, char **argv)
     // controller); documented extension point for gameplay animations.
     // Screenshot capture is deferred ~30 frames so startup (shadow map init,
     // ImGui font bake) has definitely settled before the image is read back.
-    app.onFrameUpdate = [&app, player, flashlight, &screenshotPath, screenshotFrame, debugInput](float frameDt) {
+    app.onFrameUpdate = [&](float frameDt) {
         (void)player;
         (void)flashlight;
+
+        // Key handling that changes game state lives here, not in the fixed
+        // step: several fixed steps can run per frame, and an edge action
+        // would then toggle once per step.
+        if (app.input().pressed(Action::TogglePatrol)) {
+            patrolEnabled = !patrolEnabled;
+            noteHotkey(kHotkeyPatrol);
+            HOR_LOG_INFO("patrol {}", patrolEnabled ? "on" : "off");
+        }
         if (debugInput) {
             // Mouse is consumed by the fixed step, so this shows what is still
             // pending plus the resulting orientation for this frame.

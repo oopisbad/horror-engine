@@ -140,6 +140,22 @@ void ImGuiOverlay::drawDebugWindows(Application &app)
         ImGui::SliderFloat("fog density", &post.fogDensity, 0.0f, 0.2f, "%.3f");
         ImGui::ColorEdit3("fog color", &post.fogColor.x, ImGuiColorEditFlags_Float);
 
+        // Trigger events are gameplay state, not renderer state: show the
+        // authoritative component fields so "walking onto it" is testable from
+        // the overlay (the console gets an INFO line on each entry).
+        ImGui::Separator();
+        ImGui::Text("triggers");
+        {
+            int shown = 0;
+            app.scene().view<TriggerVolume>([&](EntityId, const TriggerVolume &trigger) {
+                ImGui::Text("%s: enters %d %s", trigger.tag.c_str(), trigger.enterCount,
+                    trigger.playerInside ? "(inside)" : "");
+                ++shown;
+            });
+            if (shown == 0)
+                ImGui::Text("(none)");
+        }
+
         ImGui::Separator();
         ImGui::Text("animation");
         bool bones = renderer.drawBones();
@@ -193,6 +209,7 @@ void ImGuiOverlay::drawDebugWindows(Application &app)
         ImGui::Separator();
         ImGui::Text("controls: WASD move · Shift sprint · Ctrl crouch · Space jump");
         ImGui::Text("F1 UI · P wireframe · O debug draw · V vsync · Esc quit");
+        ImGui::Text("F9 flight recorder dump · M patrol sample models");
     }
     ImGui::End();
 }

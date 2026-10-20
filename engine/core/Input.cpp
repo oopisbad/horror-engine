@@ -30,6 +30,7 @@ Input::Input()
     bindings_[(size_t)Action::ToggleDebugDraw] = { GLFW_KEY_O };
     bindings_[(size_t)Action::ToggleVsync] = { GLFW_KEY_V };
     bindings_[(size_t)Action::DumpRecorder] = { GLFW_KEY_F9 };
+    bindings_[(size_t)Action::TogglePatrol] = { GLFW_KEY_M };
     bindings_[(size_t)Action::Quit] = { GLFW_KEY_ESCAPE };
 }
 
@@ -112,28 +113,35 @@ void Input::resyncMouse(const char *why)
 
 void Input::cursorPosCallback(GLFWwindow *, double x, double y)
 {
-    Input *self = active_;
-    if (!self)
-        return;
-    const glm::vec2 pos(static_cast<float>(x), static_cast<float>(y));
-    const glm::vec2 delta = pos - self->mousePos_;
-    self->mousePos_ = pos;
+    if (active_)
+        active_->handleCursorPos(glm::vec2(static_cast<float>(x), static_cast<float>(y)));
+}
 
-    if (self->firstMouseSample_ || self->resyncSamples_ > 0) {
-        // The first callback after a capture/focus change is not movement: the
+void Input::simulateCursorMove(const glm::vec2 &position)
+{
+    handleCursorPos(position);
+}
+
+void Input::handleCursorPos(const glm::vec2 &pos)
+{
+    const glm::vec2 delta = pos - mousePos_;
+    mousePos_ = pos;
+
+    if (firstMouseSample_ || resyncSamples_ > 0) {
+        // The first samples after a capture/focus change are not movement: the
         // cursor may have been warped from anywhere to the window/capture
         // position. Swallow a couple of samples so the warp and the position
         // event that follows it both fall inside the window -- swallowing only
         // the first one let the second through as a huge delta, which is what
         // snapped the camera to a fixed orientation (pitch clamped at +/-89).
-        if (self->resyncSamples_ > 0)
-            --self->resyncSamples_;
-        self->firstMouseSample_ = false;
+        if (resyncSamples_ > 0)
+            --resyncSamples_;
+        firstMouseSample_ = false;
         return;
     }
 
     // Accumulate only captured motion: free-cursor movement is UI navigation.
-    if (!self->mouseCaptured_)
+    if (!mouseCaptured_)
         return;
 
     // A single event can never be a real mouse movement at hundreds of pixels;
@@ -141,19 +149,19 @@ void Input::cursorPosCallback(GLFWwindow *, double x, double y)
     // Applying it rotates the camera by 30-180 degrees in one step.
     constexpr float kMaxEventDelta = 500.0f;
     if (glm::length(delta) > kMaxEventDelta) {
-        if (self->resyncEvents_ < 8) {
-            ++self->resyncEvents_;
+        if (warpEvents_ < 8) {
             HOR_LOG_WARN(
                 "mouse warp dropped: event delta ({:+.1f},{:+.1f}) px, captured={} focused={} raw={}",
-                delta.x, delta.y, self->mouseCaptured_ ? 1 : 0,
-                self->focused_ ? 1 : 0, self->rawMouseMotion_ ? 1 : 0);
+                delta.x, delta.y, mouseCaptured_ ? 1 : 0, focused_ ? 1 : 0,
+                rawMouseMotion_ ? 1 : 0);
         }
+        ++warpEvents_;
         return;
     }
 
     // Several motion events can land in one frame; a per-event overwrite
     // silently drops pixels (jittery, light look).
-    self->mouseDelta_ += delta;
+    mouseDelta_ += delta;
 }
 
 void Input::scrollCallback(GLFWwindow *, double dx, double dy)
@@ -308,6 +316,7 @@ const char *Input::actionName(Action a)
     case Action::ToggleDebugDraw: return "ToggleDebugDraw";
     case Action::ToggleVsync: return "ToggleVsync";
     case Action::DumpRecorder: return "DumpRecorder";
+    case Action::TogglePatrol: return "TogglePatrol";
     case Action::Quit: return "Quit";
     default: return "Unknown Action";
     }

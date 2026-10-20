@@ -198,6 +198,67 @@ void fireEvents(const AnimationClip &clip, float from, float to, bool looping,
 
 } // namespace
 
+void AnimationSystem::evaluate(Animator &anim)
+{
+    if (!anim.skeleton || !anim.clips || anim.currentClip < 0)
+        return;
+
+    const Skeleton &sk = *anim.skeleton;
+    // Resize once per skeleton, not once per frame of a live alloc.
+    if (anim.boneMatrices.size() != static_cast<size_t>(sk.jointCount()))
+        anim.boneMatrices.assign(static_cast<size_t>(sk.jointCount()), glm::mat4(1.0f));
+    if (anim.jointWorldPositions.size() != static_cast<size_t>(sk.jointCount()))
+        anim.jointWorldPositions.assign(static_cast<size_t>(sk.jointCount()), glm::vec3(0.0f));
+
+    const AnimationClip *current = anim.clip(anim.currentClip);
+    if (!current)
+        return;
+
+    // ---- sample current pose (and outgoing pose during a crossfade) ----
+    Pose pose;
+    sampleClipInto(*current, anim.currentTime, sk, pose);
+
+    if (anim.previousClip >= 0 && anim.fadeDuration > 0.0f) {
+        const AnimationClip *previous = anim.clip(anim.previousClip);
+        if (previous) {
+            Pose prevPose;
+            sampleClipInto(*previous, anim.previousTime, sk, prevPose);
+            // Smoothstep keeps the blend from changing speed abruptly
+            // at the start/end of the fade.
+            float w = anim.fadeElapsed / anim.fadeDuration;
+            w = w * w * (3.0f - 2.0f * w);
+            Pose blended;
+            blendPose(prevPose, pose, w, blended);
+            pose = std::move(blended);
+        }
+    }
+
+    // ---- skinning matrices --------------------------------------------
+    std::vector<glm::mat4> worlds;
+    computeNodeWorlds(sk, pose, worlds);
+    for (int j = 0; j < sk.jointCount(); ++j) {
+        const int node = sk.joints[static_cast<size_t>(j)];
+        if (node < 0 || static_cast<size_t>(node) >= worlds.size())
+            continue;
+        const glm::mat4 &nodeWorld = worlds[static_cast<size_t>(node)];
+        // Mesh-node space first, then joint world, then bind inverse.
+        anim.boneMatrices[static_cast<size_t>(j)] = sk.meshNodeInverse * nodeWorld
+            * sk.inverseBind[static_cast<size_t>(j)];
+        // Joint origin in *mesh-node space* -- the space of the entity's model
+        // matrix, i.e. the space a skinned vertex lands in after the shader.
+        // Multiplying by the entity's world matrix (as the bone debug draw
+        // does) then puts the joint exactly where the skinned vertices are.
+        //
+        // The meshNodeInverse is what makes CesiumMan/Fox line up: their joint
+        // nodes hang off the glTF scene root (Z-up conversion / armature
+        // nodes), NOT off the mesh node, so a raw `jointWorld` position is in
+        // a different space and the skeleton drew rotated/displaced relative
+        // to the skin.
+        anim.jointWorldPositions[static_cast<size_t>(j)] =
+            glm::vec3(sk.meshNodeInverse * nodeWorld * glm::vec4(0.0f, 0.0f, 0.0f, 1.0f));
+    }
+}
+
 void AnimationSystem::update(Scene &scene, float deltaSeconds)
 {
     const float dt = std::max(deltaSeconds, 0.0f);
@@ -209,12 +270,6 @@ void AnimationSystem::update(Scene &scene, float deltaSeconds)
             return;
 
         const Skeleton &sk = *anim.skeleton;
-        // Resize once per skeleton, not once per frame of a live alloc.
-        if (anim.boneMatrices.size() != static_cast<size_t>(sk.jointCount()))
-            anim.boneMatrices.assign(static_cast<size_t>(sk.jointCount()), glm::mat4(1.0f));
-        if (anim.jointWorldPositions.size() != static_cast<size_t>(sk.jointCount()))
-            anim.jointWorldPositions.assign(static_cast<size_t>(sk.jointCount()), glm::vec3(0.0f));
-
         const AnimationClip *current = anim.clip(anim.currentClip);
         if (!current)
             return;
@@ -239,10 +294,8 @@ void AnimationSystem::update(Scene &scene, float deltaSeconds)
         if (!anim.currentLooping || newTime >= oldTime)
             fireEvents(*current, oldTime, newTime, anim.currentLooping, anim.onEvent);
 
-        // ---- sample current pose (and outgoing pose during a crossfade) ----
-        Pose pose;
-        sampleClipInto(*current, anim.currentTime, sk, pose);
-
+        // Fade bookkeeping has to happen before the pose is sampled (the
+        // blend weight is part of the sample).
         if (anim.previousClip >= 0 && anim.fadeDuration > 0.0f) {
             anim.fadeElapsed += dt;
             if (anim.fadeElapsed >= anim.fadeDuration) {
@@ -254,34 +307,11 @@ void AnimationSystem::update(Scene &scene, float deltaSeconds)
                     anim.previousTime += dt * anim.speed;
                     if (previous->duration > 1e-6f)
                         anim.previousTime = std::fmod(anim.previousTime, previous->duration);
-                    Pose prevPose;
-                    sampleClipInto(*previous, anim.previousTime, sk, prevPose);
-                    // Smoothstep keeps the blend from changing speed abruptly
-                    // at the start/end of the fade.
-                    float w = anim.fadeElapsed / anim.fadeDuration;
-                    w = w * w * (3.0f - 2.0f * w);
-                    Pose blended;
-                    blendPose(prevPose, pose, w, blended);
-                    pose = std::move(blended);
                 }
             }
         }
 
-        // ---- skinning matrices --------------------------------------------
-        std::vector<glm::mat4> worlds;
-        computeNodeWorlds(sk, pose, worlds);
-        for (int j = 0; j < sk.jointCount(); ++j) {
-            const int node = sk.joints[static_cast<size_t>(j)];
-            if (node < 0 || static_cast<size_t>(node) >= worlds.size())
-                continue;
-            const glm::mat4 &nodeWorld = worlds[static_cast<size_t>(node)];
-            // Mesh-node space first, then joint world, then bind inverse.
-            anim.boneMatrices[static_cast<size_t>(j)] = sk.meshNodeInverse * nodeWorld
-                * sk.inverseBind[static_cast<size_t>(j)];
-            // Model-space joint position (the debug drawer applies the entity
-            // world matrix, matching the skinned vertex path).
-            anim.jointWorldPositions[static_cast<size_t>(j)] = glm::vec3(nodeWorld[3]);
-        }
+        evaluate(anim);
     });
 }
 

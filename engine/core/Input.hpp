@@ -32,6 +32,7 @@ enum class Action : uint8_t {
     ToggleDebugDraw,
     ToggleVsync,
     DumpRecorder, // F9: write the flight recorder ring buffer to ./debug_dump.txt
+    TogglePatrol, // M: walk the sample models along their in-place clips
     Quit,
     Count
 };
@@ -83,6 +84,12 @@ public:
     // Mirrors what the GLFW callback does; call after update().
     void setScriptedKey(int key, bool down);
     void injectMouseDelta(const glm::vec2 &pixels);
+    // Feeds an absolute cursor position through the *real* cursor path
+    // (re-baseline swallowing, warp rejection, capture gating). Used by the
+    // self-test to prove that a warp cannot reach the camera.
+    void simulateCursorMove(const glm::vec2 &position);
+    // Cursor samples rejected as warps since start (diagnostic).
+    int warpEvents() const { return warpEvents_; }
 
     // Only true when ImGui wants the mouse (so clicks reach the overlay
     // instead of reaching gameplay handlers).
@@ -103,6 +110,8 @@ private:
     // absolute cursor position is meaningless right after either one (the
     // window manager warps the pointer when the cursor mode changes).
     void resyncMouse(const char *why);
+    // Shared by the GLFW callback and the test hook.
+    void handleCursorPos(const glm::vec2 &pos);
 
     struct KeyState {
         bool wasDown : 1; // previous frame
@@ -134,6 +143,7 @@ private:
     // delta ("camera snaps to a fixed orientation").
     int resyncSamples_ = 0;
     int resyncEvents_ = 0;
+    int warpEvents_ = 0;
 };
 
 } // namespace horror
