@@ -430,7 +430,6 @@ Deliberate choices worth knowing:
 23. **The camera flinched on landing** (bug 2). Not the ball: the head bob.
     `bobOffset` is damped to zero while airborne, and the old code drove the
     sine straight from it the instant `grounded` came back, so the strongest
-    
     single-step discontinuity was up to `kBobVertical` (3 cm) of eye height
     plus roll -- at whatever phase the walk happened to resume. The amplitude
     is now ramped (`CharacterController::bobAmount`, 8/s) and the waveform is
