@@ -15,6 +15,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <initializer_list>
+#include <limits>
 #include <sstream>
 #include <string>
 #include <string_view>
@@ -143,11 +144,75 @@ void buildTestScene(Application &app)
     scene.add(flashlight, SpotLight{});
 }
 
-// Loads a glTF scene and starts a clip on every Animator it created.
-// `preferredClip` falls back to the first clip when not present.
+// World-space AABB of every rest-pose mesh under a level instance, taken from
+// the scene's evaluated hierarchy so node transforms (CesiumMan's Z-up
+// conversion nodes), the root yaw and the root scale (Fox: 0.012) all apply.
+// Returns false when the instance has no renderable meshes.
+bool levelWorldBounds(Scene &scene, const LevelInstance &level,
+    glm::vec3 &outMin, glm::vec3 &outMax)
+{
+    outMin = glm::vec3(std::numeric_limits<float>::max());
+    outMax = glm::vec3(std::numeric_limits<float>::lowest());
+    bool any = false;
+    const auto accumulate = [&](EntityId id, const Mesh *mesh) {
+        if (!mesh)
+            return;
+        const glm::mat4 world = scene.worldMatrix(id);
+        const glm::vec3 mn = mesh->minBounds();
+        const glm::vec3 mx = mesh->maxBounds();
+        for (int corner = 0; corner < 8; ++corner) {
+            const glm::vec3 local((corner & 1) ? mx.x : mn.x,
+                (corner & 2) ? mx.y : mn.y,
+                (corner & 4) ? mx.z : mn.z);
+            const glm::vec3 p = glm::vec3(world * glm::vec4(local, 1.0f));
+            outMin = glm::min(outMin, p);
+            outMax = glm::max(outMax, p);
+            any = true;
+        }
+    };
+    for (EntityId id : level.meshEntities) {
+        if (const MeshRenderer *mr = scene.find<MeshRenderer>(id))
+            accumulate(id, mr->mesh);
+        else if (const SkinnedMeshRenderer *sr = scene.find<SkinnedMeshRenderer>(id))
+            accumulate(id, sr->mesh);
+    }
+    return any;
+}
+
+// Feet on the floor: offsets the level ROOT (in world/parent space) so the
+// lowest rest-pose vertex sits exactly on `floorY`. An authored spawn height
+// alone is not enough -- it assumes each model's origin is at its feet, which
+// is exactly the assumption that sank both samples once the root transform was
+// lost (NOTES bug 20). CesiumMan's mesh lives under Z-up conversion nodes and
+// the Fox is authored in centimeters with a 0.012 root scale, so the evaluated
+// hierarchy is the only reliable source for the offset.
+float snapLevelToFloor(Scene &scene, LevelInstance &level, float floorY)
+{
+    if (!scene.valid(level.root)) {
+        HOR_LOG_WARN("floor snap: level instance has no root");
+        return 0.0f;
+    }
+    scene.updateWorldMatrices();
+    glm::vec3 mn(0.0f), mx(0.0f);
+    if (!levelWorldBounds(scene, level, mn, mx)) {
+        HOR_LOG_WARN("floor snap: level '{}' has no mesh bounds", scene.name(level.root));
+        return 0.0f;
+    }
+    const float lift = floorY - mn.y;
+    scene.transform(level.root).position.y += lift;
+    scene.updateWorldMatrices();
+    HOR_LOG_INFO(
+        "level '{}': rest bbox y [{:.3f}, {:.3f}] x [{:.3f}, {:.3f}] -> lifted {:.3f} m onto floor {:.3f}",
+        scene.name(level.root), mn.y, mx.y, mn.x, mx.x, lift, floorY);
+    return lift;
+}
+
+// Loads a glTF scene, starts a clip on every Animator it created and puts the
+// rest-pose feet on the corridor floor. `preferredClip` falls back to the
+// first clip when not present.
 void spawnGltfLevel(Application &app, const char *path, const glm::vec3 &position,
     float yawDegrees, LevelInstance &instance, const char *preferredClip = nullptr,
-    float scale = 1.0f)
+    float scale = 1.0f, float floorY = kFloorTopY)
 {
     auto model = app.assets().loadModel(path);
     if (!model || !model->valid()) {
@@ -169,6 +234,9 @@ void spawnGltfLevel(Application &app, const char *path, const glm::vec3 &positio
             index = 0;
         animator.playIndex(index, 0.0f, true);
     });
+
+    // Placement is bounds-driven: the authored spawn height is only a hint.
+    snapLevelToFloor(app.scene(), instance, floorY);
 }
 
 // ---- scripted input / self-test ---------------------------------------------
@@ -323,8 +391,10 @@ void runScript(Application &app, EntityId player, float dt, const std::string &s
         start.x, start.y, start.z, end.x, end.y, end.z);
 }
 
-// Scripted movement matrix. Returns the number of failed checks.
-int runSelfTest(Application &app, EntityId player, float dt)
+// Scripted movement matrix + model placement checks. Returns the number of
+// failed checks.
+int runSelfTest(Application &app, EntityId player, float dt,
+    const LevelInstance &cesiumMan, const LevelInstance &fox)
 {
     Scene &scene = app.scene();
     Camera &cam = app.camera();
@@ -571,6 +641,29 @@ int runSelfTest(Application &app, EntityId player, float dt)
                 + std::to_string(heldOnly) + "/" + std::to_string(releaseEdge));
     }
 
+    // Test models: the rest-pose lowest vertex must sit on the floor slab's
+    // top face. This is the regression check for the sunk-models bug: spawning
+    // at the slab height ignored each model's own origin/axis/scale.
+    auto reportModelFloor = [&](const char *name, const LevelInstance &level) {
+        if (!scene.valid(level.root)) {
+            report(name, false, "model not instantiated");
+            return;
+        }
+        scene.updateWorldMatrices();
+        glm::vec3 mn(0.0f), mx(0.0f);
+        if (!levelWorldBounds(scene, level, mn, mx)) {
+            report(name, false, "no mesh bounds");
+            return;
+        }
+        const float error = mn.y - kFloorTopY;
+        std::ostringstream detail;
+        detail << "lowest_y=" << mn.y << " floor=" << kFloorTopY
+               << " (error " << error * 1000.0f << " mm) top_y=" << mx.y;
+        report(name, std::abs(error) < 5e-4f, detail.str());
+    };
+    reportModelFloor("CesiumMan floor", cesiumMan);
+    reportModelFloor("Fox floor", fox);
+
     scene.destroy(ledge);
     scene.destroy(thinWall);
     scene.destroy(pad);
@@ -597,6 +690,7 @@ int main(int argc, char **argv)
     std::string screenshotPath;
     std::string script;      // --script: scripted input before the main loop
     bool selftest = false;   // --selftest: scripted movement/mouse assertions
+    bool testModels = false; // --test-models: load CesiumMan/Fox sample assets
     bool debugInput = false; // --debug-input: per-step/per-frame input trace
     for (int i = 1; i < argc; ++i) {
         const std::string a = argv[i];
@@ -623,6 +717,8 @@ int main(int argc, char **argv)
             script = value();
         else if (a == "--selftest")
             selftest = true;
+        else if (a == "--test-models")
+            testModels = true;
         else if (a == "--debug-input")
             debugInput = true;
     }
@@ -632,15 +728,26 @@ int main(int argc, char **argv)
 
     buildTestScene(app);
 
-    // Step 2 test content: Khronos sample models (skinned, animated) in the
-    // corridor. Held in main's scope for the whole run: the level keeps the
-    // asset (meshes/materials/textures) alive.
+    // Step 2 test content: Khronos sample models (skinned, animated). Held in
+    // main's scope for the whole run: the level keeps the asset
+    // (meshes/materials/textures) alive. Off by default so the base scene is
+    // the procedural corridor + crates only; --selftest needs them for the
+    // floor-snap assertions.
     LevelInstance cesiumMan;
     LevelInstance fox;
-    spawnGltfLevel(app, "test/CesiumMan.glb", { 0.0f, 0.05f, -5.5f }, 0.0f, cesiumMan);
-    // The Fox asset is authored in centimeters (mesh bounds ~80 units tall),
-    // so its level root carries the scale. CesiumMan is already in meters.
-    spawnGltfLevel(app, "test/Fox.glb", { -1.1f, 0.05f, -8.2f }, 25.0f, fox, "Walk", 0.012f);
+    if (testModels || selftest) {
+        // Flanking the corridor just ahead of the spawn: inside the flashlight
+        // cone and unobstructed (the far end is hidden behind crate-3/pillar),
+        // while the centre line between them stays walkable. The y in these
+        // positions is only a hint -- spawnGltfLevel lifts each root from its
+        // measured rest-pose bounds so the feet touch the floor.
+        spawnGltfLevel(app, "test/CesiumMan.glb", { -1.0f, 0.0f, -2.8f }, 180.0f,
+            cesiumMan);
+        // The Fox asset is authored in centimeters (mesh bounds ~80 units tall),
+        // so its level root carries the scale. CesiumMan is already in meters.
+        spawnGltfLevel(app, "test/Fox.glb", { 1.1f, 0.0f, -2.4f }, 165.0f, fox,
+            "Walk", 0.012f);
+    }
 
     // --- fixed-step gameplay ------------------------------------------------
     EntityId player = 0; // first created entity is the player (see builder above)
@@ -662,7 +769,7 @@ int main(int argc, char **argv)
     app.scene().updateWorldMatrices();
     app.scene().refreshColliderBounds();
     if (selftest) {
-        const int failures = runSelfTest(app, player, cfg.fixedStepSeconds);
+        const int failures = runSelfTest(app, player, cfg.fixedStepSeconds, cesiumMan, fox);
         return failures == 0 ? 0 : 1;
     }
     if (!script.empty())

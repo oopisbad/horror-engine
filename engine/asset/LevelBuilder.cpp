@@ -53,12 +53,21 @@ LevelInstance LevelBuilder::instantiate(Scene &scene, std::shared_ptr<GltfModel>
     const std::string baseName = m.path().substr(m.path().find_last_of('/') + 1);
 
     result.root = scene.create(namePrefix + baseName);
-    scene.transform(result.root) = rootTransform;
+    // Copy only the TRS: Transform also owns the parent/children links that
+    // create() just set up. Assigning a whole Transform{} replaced them with
+    // "no parent", which silently detached every node from the level root
+    // (the root's placement, yaw and scale then did not reach the meshes).
+    auto setLocal = [](Transform &target, const Transform &local) {
+        target.position = local.position;
+        target.rotation = local.rotation;
+        target.scale = local.scale;
+    };
+    setLocal(scene.transform(result.root), rootTransform);
     result.entities.push_back(result.root);
 
     auto addEntity = [&](const std::string &name, EntityId parent, const Transform &transform) {
         EntityId e = scene.create(name, parent);
-        scene.transform(e) = transform;
+        setLocal(scene.transform(e), transform);
         result.entities.push_back(e);
         return e;
     };

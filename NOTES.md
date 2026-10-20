@@ -29,6 +29,7 @@ previous working program).
 ./build/game [--w N] [--h N] [--vsync on|off] [--fullscreen]
              [--frames N] [--screenshot out.tga] [--shot-frame N] [--shadow N]
              [--ui title] [--debug-input] [--script "..."] [--selftest]
+             [--test-models]
 ```
 
 `--frames N` exits after N frames and `--screenshot` writes a TGA after ~30
@@ -43,12 +44,20 @@ Input debugging (added in the movement/mouse pass):
   synthetic input before the render loop. Commands: `hold <KEY[+KEY]> <steps>`,
   `release <KEY>`, `wait <steps>`, `mouse <dx> <dy>`. Keys: W A S D SPACE SHIFT
   CTRL. `hold` presses for exactly N steps, then releases.
-- `--selftest` runs a 16-check scripted assertion matrix (walk W/A/S/D,
+- `--selftest` runs an 18-check scripted assertion matrix (walk W/A/S/D,
   diagonal, sprint, crouch, idle, jump, corridor wall stop, 0.2 m step-offset,
   6 cm thin-wall, mouse right/up/invert, key edges) on a private platform away
   from the corridor and exits non-zero on failure. It needs a GL window
   (Application owns the scene/camera), so it is scripted rather than fully
-  headless.
+  headless. The last two checks are model placement: CesiumMan's and Fox's
+  rest-pose lowest vertex must be at `kFloorTopY` (0.05 m) within 0.5 mm; the
+  selftest loads the sample models even without `--test-models`.
+- `--test-models` loads `assets/test/CesiumMan.glb` and `Fox.glb` into the test
+  scene. Default is off: the base scene is the procedural corridor + crates
+  only. With the flag, the two models flank the corridor just ahead of the
+  spawn (CesiumMan left at x=-1.0/z=-2.8 facing the player, Fox right at
+  x=1.1/z=-2.4), inside the flashlight cone, clear of the crates and pillar,
+  leaving the centre line walkable. They have no colliders.
 
 ### Controls
 
@@ -150,7 +159,8 @@ Deliberate choices worth knowing:
   ambient color/intensity.
 - DebugDraw: lines, boxes, spheres (3 great circles), axes, frustums.
 - Placeholder test scene: corridor + crates + ball, two point lights,
-  flashlight, procedural meshes only.
+  flashlight, procedural meshes only (sample glTF models are opt-in via
+  `--test-models`).
 
 ## Partial / missing (target spec audit)
 
@@ -200,9 +210,17 @@ Deliberate choices worth knowing:
   looping and one-shot clips, `finished` flag, time-based events from clip
   extras (`footsteps`).
 - **Test content**: `assets/test/CesiumMan.glb` and `Fox.glb` load into the
-  corridor. CesiumMan is meters; Fox is authored in centimeters and its level
-  root uses a 0.012 scale. ImGui: per-animator clip combo, global playback
-  speed, bone debug draw toggle.
+  corridor with `--test-models` (see the CLI section). CesiumMan is meters; Fox
+  is authored in centimeters and its level root uses a 0.012 scale. ImGui:
+  per-animator clip combo, global playback speed, bone debug draw toggle.
+- **Placement is bounds-driven**: `spawnGltfLevel` instantiates the level, then
+  `snapLevelToFloor` computes the world-space AABB of every rest-pose mesh
+  (`levelWorldBounds`: transforms the mesh-local min/max corners by each mesh
+  entity's `scene.worldMatrix`, so node hierarchy, Z-up conversion nodes, the
+  root yaw and the 0.012 scale all apply) and adds `floorY - min.y` to the
+  level ROOT's position. The spawn `y` passed to the helper is only a hint;
+  feet land on the floor by construction. This is the fix for the sunk-model
+  bug below.
 - glTF is Y-up, right-handed, meters — the same as the engine, so no axis
   conversion; see `docs/BLENDER_EXPORT.md` for the export checklist.
 
@@ -313,6 +331,23 @@ Deliberate choices worth knowing:
     steps tested degenerate boxes at the origin. Bounds are refreshed once
     before the loop.
 
+20. **CesiumMan and Fox were partly sunk into the floor** — `LevelBuilder`
+    created each node entity with `scene.create(name, parent)` and then did
+    `scene.transform(e) = transform`, assigning a whole `Transform{}`. That
+    struct also owns `parent`/`children`, so the assignment reset the node's
+    parent to `kInvalidEntity` and detached it from the level root while the
+    root still listed it as a child. `updateWorldMatrices` then walked the
+    node twice: once under the root and once as a root with an identity
+    parent, which overwrote the world matrix. Result: the root's position,
+    yaw and scale never reached the meshes — models rendered at their
+    node-local origin (5 cm into the slab) and Fox, whose 79-unit height
+    depends on the root's 0.012 scale, was not scaled at all. Fix: copy only
+    position/rotation/scale into the existing transform (`setLocal` in
+    `LevelBuilder::instantiate`). Root cause of the *symptom*: placement
+    trusted the authored spawn height and the model origin. `spawnGltfLevel`
+    now snaps the root from measured rest-pose world bounds, and the
+    `--selftest` floor checks guard both models.
+
 ## Known issues / TODO
 
 - Point lights do not cast shadows (only the flashlight).
@@ -327,6 +362,13 @@ Deliberate choices worth knowing:
 - The imported test models read very dark in-game by design (ambient is
   near-black): point the flashlight at them, or raise ambient/post exposure in
   the F1 overlay when inspecting them.
+- Screenshots are written vertically flipped: `takeScreenshot` reverses the
+  GL rows into top-down order but leaves the TGA origin descriptor at 0
+  (bottom-left). The pixel data is correct top-down, so viewing tools show it
+  upside down; flip on load or set `header[17] = 0x20` to fix properly.
+- Floor snapping uses the rest pose by design; a clip whose pose drops a foot
+  below the bind pose can still poke through the slab (CesiumMan's idle does
+  not).
 - Sound, UI/gameplay menus and AI are out of scope for now.
 - The material placeholder is a `ForwardRenderer` member (no statics in
   `Texture`); any new GL-owning singleton must follow the same rule.
