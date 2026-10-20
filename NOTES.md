@@ -30,6 +30,7 @@ previous working program).
              [--frames N] [--screenshot out.tga] [--shot-frame N] [--shadow N]
              [--ui title] [--debug-input] [--script "..."] [--selftest]
              [--test-models] [--debug-skin] [--debug-bones] [--patrol]
+             [--wireframe]
 ```
 
 `--frames N` exits after N frames and `--screenshot` writes a TGA after ~30
@@ -44,17 +45,18 @@ Input debugging (added in the movement/mouse pass):
   synthetic input before the render loop. Commands: `hold <KEY[+KEY]> <steps>`,
   `release <KEY>`, `wait <steps>`, `mouse <dx> <dy>`. Keys: W A S D SPACE SHIFT
   CTRL. `hold` presses for exactly N steps, then releases.
-- `--selftest` runs a 23-check scripted assertion matrix (walk W/A/S/D,
+- `--selftest` runs a 26-check scripted assertion matrix (walk W/A/S/D,
   diagonal, sprint, crouch, idle, jump, corridor wall stop, 0.2 m step-offset,
   6 cm thin-wall, mouse right/up/invert, key edges, landing bob continuity,
-  red-ball trigger, mouse warp guard) on a private platform away from the
+  red-ball trigger, mouse warp guard, single-step look-spike rejection,
+  flashlight beam aim, crouch eye height) on a private platform away from the
   corridor and exits non-zero on failure. It needs a GL window (Application
   owns the scene/camera), so it is scripted rather than fully headless. The
   last four checks are the sample models: the lowest vertex (rest pose and
-  every sampled pose of the playing clip) must sit on `kFloorTopY` (0.05 m)
-  within 1 mm, the foot/head vertex must stay within 0.30/0.60 m of the joint
-  the overlay draws, and no joint may fall outside the skinned body. The
-  selftest loads the sample models even without `--test-models`.
+  every sampled pose of the playing clip, 24 samples) must sit on `kFloorTopY`
+  (0.05 m) within 1 mm, the foot/head vertex must stay within 0.30/0.60 m of
+  the joint the overlay draws, and no joint may fall outside the skinned body.
+  The selftest loads the sample models even without `--test-models`.
 - `--test-models` loads `assets/test/CesiumMan.glb` and `Fox.glb` into the test
   scene. Default is off: the base scene is the procedural corridor + crates
   only. With the flag, the two models flank the corridor just ahead of the
@@ -64,43 +66,116 @@ Input debugging (added in the movement/mouse pass):
 - `--debug-skin` CPU-skins every vertex of the sample models with the exact
   joint matrices uploaded to the UBO and prints, for 9 times across the clip,
   the foot/head vertex, the joint position the skeleton overlay draws, the
-  distance between them, the lowest/highest vertex, and how many joints fall
-  outside the skinned body. This is the tool that decides "is the mesh where we
+  distance between them, the lowest/highest vertex, how many joints fall
+  outside the skinned body, the distance from each joint to its nearest
+  skinned vertex (`maxJointGap`, with the worst joint index), and the world
+  AABBs of the skinned mesh and of the drawn joints. The gap is the direct
+  "is the skeleton attached to the mesh?" number: a correct rig is a few
+  centimetres, a wrong joint space is tens of centimetres or metres. It is
+  O(joints x vertices), so it is only computed for this report and the
+  selftest (`sampleSkin(..., measureJointGap=true)`). Poses are evaluated
+  through `AnimationSystem::evaluate`, and the animator's playback state is
+  restored afterwards. This is the tool that decides "is the mesh where we
   think it is" -- see bug 21. Implies `--test-models`.
 - `--debug-bones` turns the skeleton overlay on at startup (same as the F1
-  checkbox) so one run shows mesh + bones together.
+  checkbox) so one run shows mesh + bones together. The bones are drawn in
+  x-ray mode (depth test off) so the whole rig is visible through the body;
+  a depth-tested skeleton hides inside the mesh and its visible fragments
+  look detached from it.
 - `--patrol` starts the sample models walking along their facing (same as `M`);
   their clips are in-place, so this is what makes them visibly walk.
+- `--wireframe` starts with polygon mode LINE (same as pressing `P`), for
+  geometry checks without touching the overlay.
 
 ### Flight recorder (`engine/debug/FlightRecorder`)
 
 Always on, cheap, silent. Two ring buffers of the last ~420 records (~7 s):
 
 - **per fixed step**: body position/velocity/grounded, collision push-out,
-  camera yaw/pitch/position/bob offset/bob roll, input axes, consumed raw
-  mouse delta and the look delta actually applied, capture/focus/ImGui state,
-  condition flags (`LAND`, `JUMP`, `STEP`, `PUSH`, `PROBE`, `BOB`, `SUB`,
-  `TELEPORT`) and the tags naming the last system that wrote the camera and the
-  player transform (`CharacterSystem`, `resetCharacter`, ...).
+  camera yaw/pitch/position/eye height/bob offset/bob roll, input axes,
+  consumed raw mouse delta and the look delta actually applied, capture /
+  focus / ImGui state, condition flags (`LAND`, `JUMP`, `STEP`, `PUSH`,
+  `PROBE`, `BOB`, `SUB`, `TELEPORT`, `LOOK_REJECTED`) and the tags naming the
+  last system that wrote the camera and the player transform
+  (`CharacterSystem`, `resetCharacter`, ...).
 - **per frame**: delta, steps run, camera pose, pending mouse delta, capture /
-  focus / ImGui state, and which hotkeys fired (F1, P, O, V, Esc, F9, M).
+  focus / ImGui state, which hotkeys fired (F1, P, O, V, Esc, F9, M) and the
+  last camera writer.
 
 **Automatic detection.** Each step compares the new record with the previous
-one: yaw or pitch moving more than ~6 degrees beyond the applied mouse look, a
-camera position moving more than `velocity*dt + 6 cm + 0.30 m`, or the body
-moving further than its velocity explains. On a hit it logs one `[recorder]`
+one: yaw or pitch moving more than ~6 degrees beyond the applied mouse look,
+a camera position moving more than `speed*dt + 6 cm + 0.30 m`, or the body
+moving more than `speed*dt + 2 cm + 0.30 m`. On a hit it logs one `[recorder]`
 WARNING with the offending numbers and writes `./debug_dump.txt` (the first
 anomaly always dumps; repeats are rate limited to one every 0.5 s so a
-per-step snap does not write a file per step). Deliberate resets call `noteTeleport()`, so a spawn/respawn
-never looks like a bug -- those rows are flagged `TELEPORT` instead.
+per-step snap does not write a file per step). Deliberate resets call
+`noteTeleport()`, so a spawn/respawn never looks like a bug -- those rows are
+flagged `TELEPORT` instead.
+
+The controller has a second, earlier tripwire: a single fixed step whose look
+delta would exceed 0.35 rad (about ten times the fastest human flick) is
+discarded before it is applied and reported through
+`FlightRecorder::noteSpuriousInput`. That counts as an anomaly, logs
+`[recorder] rejected look: ...` and dumps with a `rejected:` reason; the row
+carries `LOOK_REJECTED`, with `look=(+0.0000,+0.0000)` and
+`mouse=(+0.0,+0.0)` because the delta never reached the camera.
 
 **F9 dumps on demand** to `./debug_dump.txt` (also `gitignore`d). Press it
-immediately after a glitch. Reading the file: header first (`steps=`, `frames=`,
-`anomalies=`, `autoDumps=`), then oldest-first step rows (`t` is seconds since
-the oldest record), then frame rows. `look=` is what the mouse actually
-applied; compare it with the `yaw=`/`pitch=` columns to see a look jump, and
-check `cap`/`foc`/`gui` on the rows around the jump -- a `cap` or `foc` flip is
-a capture/focus transition, which is where camera snaps come from.
+immediately after a glitch. The header carries `reason:`, `steps=`, `frames=`,
+`anomalies=`, `autoDumps=` and `capacity=`; rows are oldest first, all fixed
+steps first, then frames.
+
+Step row:
+
+| column | meaning |
+| --- | --- |
+| `seq` | monotonic step sequence; it keeps counting across the ring wrap, so gaps are expected |
+| `t` | cumulative seconds across the retained rows (the first row is its own dt) |
+| `pos` | body (feet) world position |
+| `vel` | body velocity, m/s |
+| `g` | grounded (0/1) |
+| `flags` | `LAND`, `JUMP`, `STEP`, `PUSH`, `PROBE`, `BOB`, `SUB`, `TELEPORT`, `LOOK_REJECTED` |
+| `yaw`, `pitch` | camera angles after the step |
+| `look` | yaw/pitch delta actually applied this step (after sensitivity and pitch clamp) |
+| `mouse` | raw mouse pixels consumed this step, before sensitivity |
+| `cam` | camera eye world position |
+| `eye` | feet-to-eye height used for this camera position (crouch smoothing shows here) |
+| `bob` | head-bob vertical offset and roll added to the eye |
+| `push` | collision push-out applied this step |
+| `cap`, `foc`, `gui` | mouse captured, window focused, ImGui wanted the mouse |
+| `camWriter`, `playerWriter` | last system that wrote the camera / player transform |
+
+Flag meanings: `LAND` touched down this step, `JUMP` impulse applied, `STEP`
+walked up a ledge, `PUSH` collision push-out moved the body on X/Z, `PROBE`
+the walk-off-edge probe changed `pos.y`, `BOB` head bob resumed, `SUB` more
+than one collision pass, `TELEPORT` deliberate reset, `LOOK_REJECTED` the
+step's look delta was discarded as a spike.
+
+Frame row:
+
+| column | meaning |
+| --- | --- |
+| `seq` | monotonic frame sequence number |
+| `dt` | frame delta, seconds |
+| `steps` | fixed steps run this frame (0 when the frame was fast, >1 on catch-up) |
+| `cam`, `yaw`, `pitch` | camera pose after those steps |
+| `pending` | mouse delta accumulated after the steps consumed theirs, i.e. what the next step will apply |
+| `cap`, `foc` | capture/focus at the end of the frame |
+| `guiMouse`, `guiKeys` | ImGui wanted the mouse / keyboard |
+| `hotkeys` | hotkeys that fired this frame (`F1`, `P`, `O`, `V`, `Esc`, `F9`, `M`) |
+| `camWriter` | last camera writer |
+
+How to read it: `look=` is what the mouse actually applied; compare it with
+the change in `yaw=`/`pitch=` between two rows to see a look jump, and check
+`cap`/`foc`/`gui` on the rows around it -- a `cap` or `foc` flip is a
+capture/focus transition, which is where camera snaps come from. A
+`LOOK_REJECTED` row should show a zeroed `look`/`mouse` (the step was thrown
+away). `TELEPORT` rows are deliberate resets, not bugs. `eye=` moving between
+1.62 m standing and 0.97 m crouched is normal; an instant jump there is a
+camera snap. Non-zero `push=` means collision moved the body, and
+`camWriter`/`playerWriter` name whoever last wrote the camera/player
+transform -- anything other than `CharacterSystem` on an anomaly row is
+suspicious.
 
 ### Controls
 
@@ -110,9 +185,12 @@ sample models, `F9` flight recorder dump, `Esc` quit.
 
 Mouse capture is re-baselined on every capture change *and* on every window
 focus change: the cursor is warped by the window manager when the mode
-changes, and the follow-up position event was several hundred pixels of fake
-look delta (the camera snap). `Input::cursorPosCallback` also drops any single
-event larger than 500 px as a warp and logs it once.
+changes, and the follow-up position event was hundreds of pixels of fake look
+delta (the camera snap). The re-baseline clears the pending delta, swallows
+three cursor events and then every sample for 8 more frames, because the WM
+can move the pointer several frames later. `Input::cursorPosCallback` also
+drops any single event larger than 500 px as a warp (warning the first 8
+times, then only counting it in `Input::warpEvents`).
 
 Mouse convention: mouse right turns right, mouse up looks up, no acceleration
 (GLFW raw mouse motion is enabled when the platform supports it). Look
@@ -170,8 +248,9 @@ Deliberate choices worth knowing:
 - **Materials** are plain structs owned by the Scene pool; the renderer owns
   the uniform names. One shared lit shader draws everything.
 - **Flashlight** = the first `SpotLight` component. Gameplay updates its
-  entity transform (hand offset + camera yaw/pitch); the renderer reads the
-  world matrix for the light origin/axis and builds the shadow camera from it.
+  entity transform (hand offset; beam aimed at the point the view ray hits
+  12 m out, so it crosses the crosshair); the renderer reads the world matrix
+  for the light origin/axis and builds the shadow camera from it.
 - **Character controller** runs in the fixed step (1/60 s) so movement and
   collision are frame-rate independent. It is an AABB-vs-static-AABB,
   swept, axis-separated resolver (X, Z, then Y), feet-origin, with a 0.35 m
@@ -202,7 +281,12 @@ Deliberate choices worth knowing:
   material/mesh pools.
 - Character controller: walk/sprint/crouch, gravity, jump, swept
   axis-separated AABB collision, 0.35 m step-offset, sub-stepped sweeps,
-  crouch height smoothing, head bob.
+  crouch height smoothing (eye height follows it), head bob, per-step look
+  spike rejection.
+- Flight recorder: always-on step/frame ring buffers, automatic camera/body
+  discontinuity detection with auto-dump, F9 on-demand dump.
+- Skinned-model debug tooling: CPU-skinning probe (`--debug-skin`) with
+  joint-to-mesh gap and AABBs, x-ray skeleton overlay (`--debug-bones`).
 - Materials: base color (sRGB), tangent-space normal map and glTF
   metallic-roughness sampling in the forward shader; missing maps fall back to
   a renderer-owned magenta placeholder.
@@ -210,7 +294,8 @@ Deliberate choices worth knowing:
   sensitivity slider + invert Y, wireframe, debug draw, vsync, mouse capture
   toggles, post-process controls (enable/exposure/vignette/grain/fog) and
   ambient color/intensity.
-- DebugDraw: lines, boxes, spheres (3 great circles), axes, frustums.
+- DebugDraw: lines, boxes, spheres (3 great circles), axes, frustums; a
+  depth-tested batch plus an x-ray overlay batch (used by the skeleton).
 - Placeholder test scene: corridor + crates + ball, two point lights,
   flashlight, procedural meshes only (sample glTF models are opt-in via
   `--test-models`).
@@ -419,8 +504,14 @@ Deliberate choices worth knowing:
     matrices, so multiplying by the entity world matrix puts it exactly where
     the vertices are. After the fix: 0 joints outside the body, foot/head
     offsets 0.03-0.15 m / 0.32-0.34 m (the ankle-to-sole and neck-to-crown
-    distances, constant because they are rigid). `--debug-skin` prints both
-    numbers, and the selftest asserts them for both models.
+    distances, constant because they are rigid). `--debug-skin` also reports
+    the joint-to-nearest-vertex gap, which puts a wrong joint space at tens of
+    centimetres or metres and a correct rig at the centimetre scale, plus the
+    world AABBs of the mesh and the joints; the selftest asserts the offsets
+    and the joint count for both models. The overlay is also drawn in x-ray
+    mode (`DebugDraw::setOverlayMode`): with depth testing on, most bones were
+    hidden inside the mesh, so the visible fragments looked detached even when
+    the joint space was correct.
 22. **Feet sank through the floor during the walk clip** (bug 1, part 2).
     Floor placement used the rest-pose bounds, but the walk lowers the planted
     foot ~1-2.6 cm below the bind pose (hips bob, ankle rotates). Placement is
@@ -442,28 +533,67 @@ Deliberate choices worth knowing:
     a cursor-mode change, and the window manager warps the pointer; GLFW then
     delivers the *old* position and the warped position as two separate motion
     events. The old code swallowed only the first one, so the second arrived as
-    a 500-1500 px "delta" -- 60+ degrees of yaw, and pitch pinned at its +/-89
-    degree clamp, which reads as "the same fixed orientation" every time.
-    Focus loss/regain did the same thing (the pointer moves while unfocused and
-    no re-baseline happened at all). Fixes: `Input` now tracks window focus
-    (focus callback + a per-frame `GLFW_FOCUSED` backstop) and re-baselines on
-    both focus and capture transitions, swallowing *three* samples instead of
-    one; any single cursor event over 500 px is dropped as a warp and counted
-    (`Input::warpEvents`). `firstMouseSample_` alone was exactly the bug. The
-    selftest drives the real cursor path (`Input::simulateCursorMove`) and
-    asserts resync/warp deltas never reach the consumer while ordinary motion
-    does; the flight recorder flags any remaining unexplained yaw/pitch/body
-    jump and dumps automatically. If it ever happens again: press **F9** and
-    read `debug_dump.txt` (see the recorder section above).
+    a huge "delta" -- the recorded case was 205 px, i.e. 0.451 rad of yaw and
+    0.453 rad of pitch, which pins pitch at its +/-89 degree clamp and reads as
+    "the same fixed orientation" every time. A warp can also arrive several
+    frames *after* the mode change (the WM moves the pointer asynchronously),
+    which is why three swallowed samples alone were not enough. Focus
+    loss/regain did the same thing (the pointer moves while unfocused and no
+    re-baseline happened at all). Fixes: `Input` tracks window focus (focus
+    callback + a per-frame `GLFW_FOCUSED` backstop) and re-baselines on both
+    focus and capture transitions, clearing the pending delta, swallowing
+    *three* samples and then every sample for the next 8 frames
+    (`kResyncFrames`, ~130 ms at 60 fps); any single cursor event over 500 px
+    is dropped as a warp and counted (`Input::warpEvents`). `firstMouseSample_`
+    alone was exactly the bug. As a last line of defence `CharacterSystem`
+    rejects any single fixed step whose look delta would exceed 0.35 rad (ten
+    times the fastest human flick), zeroes it and reports the rejection to the
+    flight recorder (`LOOK_REJECTED`, see the recorder section). The selftest
+    drives the real cursor path (`Input::simulateCursorMove`) and asserts
+    resync/warp deltas never reach the consumer while ordinary motion does;
+    its `look spike` check feeds 900x900 px in one step and asserts no camera
+    change, a counted rejection, and that the next normal delta still turns.
+    The flight recorder flags any remaining unexplained yaw/pitch/body jump and
+    dumps automatically. If it ever happens again: press **F9** and read
+    `debug_dump.txt`.
 25. **The red circle on the floor did nothing** (bug 2). It is the procedural
     `red-ball` entity: a 0.3 m UV sphere with albedo `(0.7, 0.1, 0.1)` resting
     on the slab at `(-0.8, 0.3, -1.5)`. It had **no collider and no trigger**, so
     it was a purely visual prop -- walking through it could not do anything,
     and the "flinch" seen while standing on it was the generic landing bob.
-    It now carries a `TriggerVolume` sized from its own mesh bounds; gameplay
-    fires an edge-triggered enter event (`[trigger] entered 'red-ball' (1x)` in
-    the console, `triggers:` block in the F1 overlay, blue box in the `O`
-    debug draw that brightens while the player stands inside).
+    It now carries a `TriggerVolume`; gameplay fires an edge-triggered enter
+    event (`[trigger] entered 'red-ball' (1x)` in the console, `triggers:`
+    block in the F1 overlay, blue box in the `O` debug draw that brightens
+    while the player stands inside). The trigger is deliberately larger than
+    the ball (0.30 m beyond the collider in X/Z, 0.60 m taller) so touching the
+    side or standing on top both count, where a strict AABB test against the
+    ball would not overlap.
+
+    The ball is also solid now: an `AABBCollider` matching the sphere's mesh
+    bounds (a 0.6 m cube centred at y=0.3, so its top is 0.55 m above the slab
+    and above the 0.35 m step-offset -- you have to jump onto it). The
+    `red-ball trigger` selftest walks into it and checks that the player stops
+    at the near face (~z=-0.92) instead of passing through, fires exactly one
+    enter event and is still inside.
+
+26. **Crouching did not move the camera** -- the eye was a fixed 1.62 m above
+    the feet, so crouching shrank the collider and slowed the walk but the
+    view never came down (it read as "crouch does nothing"). The eye now
+    scales with the already-smoothed body height (`eyeHeight *
+    currentHeight / height`), so it follows standing 1.62 m down to ~0.97 m
+    crouched and back without a snap. The `crouch eye` selftest asserts the
+    standing/crouched/back heights and that no step moves the camera more than
+    0.15 m.
+
+27. **The flashlight's bright spot slid sideways near walls** -- the light
+    origin keeps a hand offset (0.12 m right of and 0.10 m below the eye), but
+    the old code aimed the beam *parallel* to the view. From an offset origin
+    that puts the spot at `atan(offset / distance)` off the crosshair:
+    invisible down a corridor, ~20 degrees on a wall 30 cm away.
+    `syncFlashlight` now aims the beam at the point the view ray reaches at
+    12 m, so it crosses the crosshair while the origin keeps the hand offset
+    (0.156 m from the eye). The `flashlight aim` selftest asserts beam-vs-view
+    under 2 degrees at three yaws plus the hand offset.
 
 ### Are the sample walk cycles supposed to stay in place?
 
