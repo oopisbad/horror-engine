@@ -19,10 +19,9 @@ class Texture;
 // Color space note: albedo stays linear; sRGB decoding happens in the texture
 // at load time when srgb=true.
 //
-// glTF import fills these from pbrMetallicRoughness. The current forward
-// shader consumes albedo/baseColorTex/roughness/emissiveStrength; metallic,
-// the normal map and the metallic-roughness map are loaded and kept for the
-// PBR shader stage (see NOTES.md).
+// glTF import fills these from pbrMetallicRoughness; the forward shader
+// samples all three texture slots (base color, tangent-space normal,
+// metallic-roughness where G=roughness and B=metallic).
 struct Material {
     std::string name; // debug label
     std::shared_ptr<Shader> shader;
@@ -37,9 +36,10 @@ struct Material {
     glm::vec3 emissiveColor{1.0f};
 
     float opacity = 1.0f;
-    Texture *baseColorTex = nullptr;           // non-owning; owned by GltfModel
-    Texture *normalTex = nullptr;              // non-owning; loaded, not sampled yet
-    Texture *metallicRoughnessTex = nullptr;   // non-owning; loaded, not sampled yet
+    // Non-owning; textures are owned by the GltfModel that created them.
+    Texture *baseColorTex = nullptr;         // sRGB
+    Texture *normalTex = nullptr;            // linear, tangent space (OpenGL +Y)
+    Texture *metallicRoughnessTex = nullptr; // linear, G=roughness B=metallic
 };
 
 } // namespace horror

@@ -93,7 +93,10 @@ Deliberate choices worth knowing:
   `find`, `view`, `transform`) hides the storage.
 - **Transforms** cache world matrices, recomputed every frame
   (`updateWorldMatrices`) with a depth cap to survive accidental cycles.
-- **Rendering** is forward, single lit shader, uniforms per draw. The scene
+- **Rendering** is forward, single lit shader, uniforms per draw. Materials
+  sample base color (unit 3), normal map (unit 4) and metallic-roughness
+  (unit 5); a missing map binds `Texture::placeholder()` with a `uHas*Tex`
+  flag so one shader serves both cases. The scene
   renders into an **HDR RGBA16F Framebuffer** with depth; a fullscreen
   triangle then applies fog (from depth), exposure, ACES tonemap, vignette,
   film grain and gamma. The shadow map (depth-only FBO) is produced by the
@@ -156,7 +159,7 @@ Deliberate choices worth knowing:
 | ImGui overlay (fps, frame time, camera pos, wireframe), debug draw | done |
 | Placeholder cube/plane test scene | done |
 | glTF 2.0 loading, skinned vertex format, animations | done (see Step 2 below) |
-| Textures/normal maps in materials | partial: base-color textures are sampled; normal/metallic-roughness maps are loaded into `Material` but the forward shader does not sample them yet |
+| Textures/normal maps in materials | done: base color (sRGB), tangent-space normal map, metallic-roughness (G=roughness, B=metallic); factors multiply the maps |
 | Audio / UI / AI | intentionally absent (extension points only) |
 
 ## Step 2 — glTF / Blender readiness
@@ -206,8 +209,10 @@ Deliberate choices worth knowing:
   duplicated per primitive (Fox: 1 primitive; acceptable at this scale).
 - Alpha modes other than OPAQUE are loaded as opaque; no transparency
   sorting.
-- Normal mapping/metallic PBR shading is not in the forward shader yet; the
-  data is loaded and ready.
+- The forward shader is a cheap metal/roughness split on the existing
+  Blinn-style model (metals lose diffuse and tint their highlight; the map
+  drives roughness and metallic). It is not full GGX PBR and there is no IBL
+  or AO map; the look stays tuned for a near-black flashlight game.
 - `COL_`/`TRIGGER_` bounds are computed at import time; they do not follow
   animated nodes.
 
@@ -303,7 +308,8 @@ Deliberate choices worth knowing:
 ## Known issues / TODO
 
 - Point lights do not cast shadows (only the flashlight).
-- No normal mapping yet; `Mesh` has no tangent attribute until step 2.
+- Normal maps are sampled but only the lit pass uses them; the shadow pass is
+  depth-only, as expected.
 - AABB collision has no step-offset, slopes, or moving platforms; sub-step
   tunneling is only bounded by the fixed 1/60 s step (step-offset and sub-step
   protection are the next task).

@@ -12,6 +12,7 @@ layout(location = 0) in vec3 vWorldPos;
 layout(location = 1) in vec3 vNormal;
 layout(location = 2) in vec2 vUv;
 layout(location = 3) in vec4 vShadowPos;
+layout(location = 4) in vec4 vTangent;
 layout(location = 0) out vec4 oColor;
 
 uniform vec3 uAmbientColor;
@@ -37,13 +38,18 @@ uniform sampler2D uShadowMap;
 uniform vec3 uCameraPos;
 uniform vec3 uAlbedo;
 uniform float uRoughness;
+uniform float uMetallic;
 uniform float uEmissive;
 // Output is linear HDR. Exposure, tonemapping, fog, vignette, grain and the
 // gamma encode all happen in post.frag.
-// Texture plumbing is stubbed for now (procedural placeholders); the base
-// color texture path activates with the first imported material.
 uniform sampler2D uBaseColorTex;
 uniform int uHasBaseColorTex;
+// Tangent-space normal map (glTF/OpenGL convention: +Y up, linear space).
+uniform sampler2D uNormalTex;
+uniform int uHasNormalTex;
+// glTF metallic-roughness map: G = roughness, B = metallic, linear space.
+uniform sampler2D uMetallicRoughnessTex;
+uniform int uHasMetallicRoughnessTex;
 
 float sampleShadow(vec4 shadowPos, float ndotl)
 {
@@ -71,8 +77,40 @@ void main()
     if (uHasBaseColorTex == 1)
         albedo *= texture(uBaseColorTex, vUv).rgb;
 
+    // glTF texture values are multipliers on the material factors, so a shared
+    // map can be scaled per material (default factors are 1.0 / 1.0).
+    float roughness = uRoughness;
+    float metallic = uMetallic;
+    if (uHasMetallicRoughnessTex == 1) {
+        vec4 mr = texture(uMetallicRoughnessTex, vUv);
+        roughness *= mr.g;
+        metallic *= mr.b;
+    }
+    roughness = clamp(roughness, 0.04, 1.0);
+    metallic = clamp(metallic, 0.0, 1.0);
+
+    // Cheap metal/roughness split on the existing Blinn-ish model: metals have
+    // no diffuse and tint their highlight with albedo; dielectrics keep the
+    // 0.2 sheen that the flashlight used before.
+    vec3 diffuseAlbedo = albedo * (1.0 - metallic);
+    vec3 specularColor = mix(vec3(0.2), albedo, metallic);
+
     vec3 N = normalize(vNormal);
     vec3 V = normalize(uCameraPos - vWorldPos);
+
+    // ---- normal map ---------------------------------------------------------
+    if (uHasNormalTex == 1) {
+        // Gram-Schmidt the interpolated tangent against N so the TBN stays
+        // orthonormal under non-uniform scale; skip if it degenerated (meshes
+        // without tangents, though every glTF primitive gets them on import).
+        vec3 T = vTangent.xyz - N * dot(N, vTangent.xyz);
+        if (dot(T, T) > 1e-8) {
+            T = normalize(T);
+            vec3 B = cross(N, T) * vTangent.w;
+            vec3 nm = texture(uNormalTex, vUv).xyz * 2.0 - 1.0;
+            N = normalize(mat3(T, B, N) * nm);
+        }
+    }
 
     vec3 lit = uAmbientColor * albedo;
 
@@ -94,9 +132,10 @@ void main()
 
         float ndotl = max(dot(N, L), 0.0);
         vec3 H = normalize(L + V);
-        float s = pow(max(dot(N, H), 0.0), mix(64.0, 8.0, uRoughness));
+        float s = pow(max(dot(N, H), 0.0), mix(64.0, 8.0, roughness));
 
-        lit += uPointLights[i].color * atten * (albedo * ndotl + vec3(0.20) * s * ndotl);
+        lit += uPointLights[i].color * atten
+            * (diffuseAlbedo * ndotl + specularColor * s * ndotl);
     }
 
     // ---- spotlight (flashlight) ---------------------------------------------
@@ -119,11 +158,11 @@ void main()
 
                 float ndotl = max(dot(N, Ldir), 0.0);
                 vec3 H = normalize(Ldir + V);
-                float s = pow(max(dot(N, H), 0.0), mix(96.0, 12.0, uRoughness));
+                float s = pow(max(dot(N, H), 0.0), mix(96.0, 12.0, roughness));
 
                 float shadow = sampleShadow(vShadowPos, ndotl);
                 lit += uSpotLightColor * atten * cone
-                    * (albedo * ndotl + vec3(0.30) * s * ndotl) * shadow;
+                    * (diffuseAlbedo * ndotl + specularColor * s * ndotl) * shadow;
             }
         }
     }

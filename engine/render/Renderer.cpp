@@ -376,6 +376,7 @@ void ForwardRenderer::mainPass(Scene &scene, Camera &camera)
             shader.setUniform("uAlbedo", item.material->albedo);
             shader.setUniform("uEmissive", item.material->emissiveStrength);
             shader.setUniform("uRoughness", item.material->roughness);
+            shader.setUniform("uMetallic", item.material->metallic);
             if (item.material->baseColorTex) {
                 item.material->baseColorTex->bind(3);
                 shader.setUniform("uHasBaseColorTex", 1);
@@ -384,6 +385,26 @@ void ForwardRenderer::mainPass(Scene &scene, Camera &camera)
                 shader.setUniform("uHasBaseColorTex", 0);
             }
             shader.setUniform("uBaseColorTex", 3);
+
+            // Unit 4: tangent-space normal map (linear data).
+            if (item.material->normalTex) {
+                item.material->normalTex->bind(4);
+                shader.setUniform("uHasNormalTex", 1);
+            } else {
+                Texture::placeholder().bind(4);
+                shader.setUniform("uHasNormalTex", 0);
+            }
+            shader.setUniform("uNormalTex", 4);
+
+            // Unit 5: glTF metallic-roughness (G=roughness, B=metallic).
+            if (item.material->metallicRoughnessTex) {
+                item.material->metallicRoughnessTex->bind(5);
+                shader.setUniform("uHasMetallicRoughnessTex", 1);
+            } else {
+                Texture::placeholder().bind(5);
+                shader.setUniform("uHasMetallicRoughnessTex", 0);
+            }
+            shader.setUniform("uMetallicRoughnessTex", 5);
 
             item.mesh->bind();
             glDrawElements(GL_TRIANGLES, item.mesh->indexCount(), GL_UNSIGNED_INT, nullptr);
