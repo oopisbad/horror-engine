@@ -16,6 +16,10 @@ namespace {
 // jump arcs. Corridor horror playtests usually land near these values.
 constexpr float kGravity = -13.0f;
 constexpr float kGroundProbe = 0.05f;  // extra downward probe height for `grounded`
+// Tolerance for "was outside this face before the axis move?" tests. Keeps
+// resting contact (feet exactly on a floor top) a valid block without letting
+// deep pre-existing overlap through.
+constexpr float kContactEps = 1e-4f;
 constexpr float kBobFrequency = 9.5f;  // rad/s at full walk speed
 constexpr float kBobLateral = 0.04f;   // meters of sideways sway
 constexpr float kBobVertical = 0.03f;  // meters of vertical bounce
@@ -39,9 +43,18 @@ void CharacterSystem::step(Scene &scene, EntityId entity, const Hooks &hooks, fl
     Transform &xf = scene.transform(entity);
 
     // ---- Look (mouse) -------------------------------------------------------
-    const glm::vec2 md = hooks.input->mouseDelta() * cc->mouseLookSensitivity;
-    hooks.camera->yaw += md.x;
-    hooks.camera->pitch -= md.y;
+    // Deltas are accumulated by Input and *consumed* here, so every pixel is
+    // applied exactly once per fixed step no matter whether a frame ran zero,
+    // one or several steps (reading a per-frame delta in the fixed step made
+    // look speed depend on the frame rate and double-applied it on catch-up).
+    const glm::vec2 rawMouse = hooks.input->consumeMouseDelta();
+    const glm::vec2 md = rawMouse * cc->mouseLookSensitivity;
+    // Screen convention (GLFW: +y is down the screen):
+    //   mouse right -> turn right, mouse up -> look up.
+    // Camera::forward() is (-sin yaw, *, -cos yaw), so *increasing* yaw turns
+    // left; turning right therefore subtracts. Pitch is up-positive.
+    hooks.camera->yaw -= md.x;
+    hooks.camera->pitch += cc->invertY ? md.y : -md.y;
     hooks.camera->clampPitch();
 
     // ---- Movement intent --------------------------------------------------
@@ -95,25 +108,32 @@ void CharacterSystem::step(Scene &scene, EntityId entity, const Hooks &hooks, fl
     // travel (~sprint 4.6m/s / 60Hz steps = 7.7cm) is under the thinnest wall
     // we'll build, and fixed timestep keeps that bound true.
     const glm::vec3 feet0 = xf.position; // feet origin
-    float px = feet0.x, py = feet0.y, pz = feet0.z;
+    glm::vec3 pos = feet0;
 
     // Player box is (radius x height/2 x radius), centered halfH above feet.
-    // Recomputed per axis because a resolution on one axis changes the others.
+    // Recomputed per collision because a resolution on one axis changes the
+    // others.
     auto playerCenter = [&] {
         const float halfH = cc->currentHeight * 0.5f;
-        return glm::vec3(px, py + halfH, pz);
+        return glm::vec3(pos.x, pos.y + halfH, pos.z);
     };
     auto playerHalf = [&] {
         return glm::vec3(cc->radius, cc->currentHeight * 0.5f, cc->radius);
     };
 
-    // Resolve overlap along one axis, pushing out opposite to `dir` (the
-    // movement direction on that axis). `dir == 0` means no motion along the
-    // axis, so an overlap there is not this axis' blocker -- pushing out would
-    // teleport the player to the far side of a large box (e.g. the floor while
-    // walking across it).
-    auto collideAxis = [&](int axis, float dir) -> bool {
-        if (dir == 0.0f)
+    glm::vec3 pushTotal(0.0f);
+
+    // Swept, axis-separated resolution.
+    //
+    // Only a face the player *newly crossed* on this axis may block: before
+    // applying the move we test whether the body was already overlapping the
+    // collider on this axis. That test is what keeps standing-on-the-floor
+    // from teleporting: while walking, the body overlaps the floor slab on Y
+    // but was already inside the slab's X/Z extent, so X/Z resolution ignores
+    // it (the old code pushed out of the nearest face instead, which is ~8 m
+    // away for the 16x16 floor -- the "WASD teleports me" bug).
+    auto collideAxis = [&](int axis, float delta) -> bool {
+        if (delta == 0.0f)
             return false;
         bool blocked = false;
         scene.view<AABBCollider>([&](EntityId, const AABBCollider &col) {
@@ -124,48 +144,63 @@ void CharacterSystem::step(Scene &scene, EntityId entity, const Hooks &hooks, fl
             // Cheap reject before computing penetration.
             if (!overlaps(center, half, col.worldMin, col.worldMax))
                 return;
+            const float before = center[axis] - delta; // pre-move centre on this axis
+            float target;
+            if (delta > 0.0f) {
+                if (before + half[axis] > col.worldMin[axis] + kContactEps)
+                    return; // already inside this extent: not this axis' blocker
+                target = col.worldMin[axis] - half[axis];
+            } else {
+                if (before - half[axis] < col.worldMax[axis] - kContactEps)
+                    return;
+                target = col.worldMax[axis] + half[axis];
+            }
+            // `target` is a box-centre coordinate; pos stores the feet origin,
+            // so undo the centre offset (half height on Y, zero on X/Z).
+            const float newPos = target - (center[axis] - pos[axis]);
+            pushTotal[axis] += newPos - pos[axis];
+            pos[axis] = newPos;
             blocked = true;
-            // Push fully out along the axis in the direction we were moving.
-            const float pen = dir > 0.0f
-                ? col.worldMin[axis] - (center[axis] + half[axis])
-                : col.worldMax[axis] - (center[axis] - half[axis]);
-            if (axis == 0)
-                px += pen;
-            else if (axis == 1)
-                py += pen;
-            else
-                pz += pen;
         });
         return blocked;
     };
 
-    px += cc->velocity.x * dt;
-    if (collideAxis(0, cc->velocity.x))
-        cc->velocity.x = 0.0f;
-    pz += cc->velocity.z * dt;
-    if (collideAxis(2, cc->velocity.z))
-        cc->velocity.z = 0.0f;
-    py += cc->velocity.y * dt;
+    const float dx = cc->velocity.x * dt;
+    const float dy = cc->velocity.y * dt;
+    const float dz = cc->velocity.z * dt;
 
-    bool blockedY = collideAxis(1, cc->velocity.y);
-    cc->grounded = blockedY; // we only get blocked downward while falling
+    pos.x += dx;
+    if (collideAxis(0, dx))
+        cc->velocity.x = 0.0f;
+    pos.z += dz;
+    if (collideAxis(2, dz))
+        cc->velocity.z = 0.0f;
+    pos.y += dy;
+
+    const bool blockedY = collideAxis(1, dy);
     if (blockedY) {
-        // Standing on something: stop falling (and cancel on upward push too,
-        // e.g., bonking a ceiling edge with head-hits-floor cases).
+        // Ground only when we were moving down; a ceiling hit must not make us
+        // think we can jump.
+        cc->grounded = dy <= 0.0f;
         cc->velocity.y = 0.0f;
-    } else if (wasGrounded && cc->velocity.y <= 0.0f) {
-        // Walked off an edge this step: probe slightly down so tiny numerical
-        // separations don't cancel grounded state on flat floors.
-        py -= kGroundProbe;
-        if (collideAxis(1, -kGroundProbe)) {
-            cc->velocity.y = 0.0f;
-        } else {
-            py += kGroundProbe;
-            cc->grounded = false; // genuinely airborne now
+    } else {
+        cc->grounded = false;
+        if (wasGrounded && cc->velocity.y <= 0.0f) {
+            // Walked off an edge this step: probe slightly down so tiny
+            // numerical separations don't cancel grounded state on flat floors.
+            const float beforeProbe = pos.y;
+            pos.y -= kGroundProbe;
+            if (collideAxis(1, -kGroundProbe)) {
+                cc->velocity.y = 0.0f;
+                cc->grounded = true;
+            } else {
+                pos.y = beforeProbe;
+            }
         }
     }
 
-    xf.position = glm::vec3(px, py, pz);
+    xf.position = pos;
+    cc->lastPush = pushTotal;
 
     // ---- Crouch height smoothing -----------------------------------------
     cc->crouching = wantCrouch;
@@ -195,6 +230,18 @@ void CharacterSystem::step(Scene &scene, EntityId entity, const Hooks &hooks, fl
     hooks.camera->position = xf.position + glm::vec3(0.0f, cc->eyeHeight, 0.0f) + cc->bobOffset;
     hooks.camera->bobOffset = cc->bobOffset;
     hooks.camera->bobRoll = cc->bobRoll;
+
+    if (hooks.logSteps) {
+        HOR_LOG_INFO(
+            "[step] pos=({:.3f},{:.3f},{:.3f}) vel=({:.3f},{:.3f},{:.3f}) "
+            "grounded={} in=(f{:+.0f} s{:+.0f} sprint={} crouch={}) "
+            "mouse=({:+.1f},{:+.1f}) yaw={:.3f} pitch={:.3f} "
+            "push=({:+.4f},{:+.4f},{:+.4f})",
+            pos.x, pos.y, pos.z, cc->velocity.x, cc->velocity.y, cc->velocity.z,
+            cc->grounded, forwardAmt, strafeAmt, wantSprint, wantCrouch,
+            rawMouse.x, rawMouse.y, hooks.camera->yaw, hooks.camera->pitch,
+            pushTotal.x, pushTotal.y, pushTotal.z);
+    }
 
     (void)targetSpeed; // (read above for sprint gate; silence unused warnings on some compilers)
 }

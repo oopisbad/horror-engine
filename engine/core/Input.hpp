@@ -45,7 +45,9 @@ public:
     void attach(Window &window);
     void detach();
 
-    // Call once per frame AFTER glfwPollEvents, BEFORE gameplay reads state.
+    // Call once per frame BEFORE glfwPollEvents, so the edge snapshot is taken
+    // from the end of the previous frame and pressed()/released() compare a
+    // key against the previous frame instead of against itself.
     void update();
 
     // --- action queries -------------------------------------------------------
@@ -60,9 +62,20 @@ public:
     // --- mouse ----------------------------------------------------------------
     void setMouseCaptured(bool captured);
     bool mouseCaptured() const { return mouseCaptured_; }
-    glm::vec2 mouseDelta() const { return mouseDelta_; }    // pixels/frame
+    // Pixels accumulated since the last consumeMouseDelta(). Negative y is up.
+    glm::vec2 mouseDelta() const { return mouseDelta_; }
+    // Hands the accumulated motion to the caller and clears it. Mouselook
+    // consumes once per fixed step so the look speed is independent of how
+    // many steps a frame runs (and no pixel is ever applied twice).
+    glm::vec2 consumeMouseDelta();
     glm::vec2 mousePos() const { return mousePos_; }
     glm::vec2 scrollDelta() const { return scrollDelta_; }
+
+    // --- scripting / tests -----------------------------------------------------
+    // Drives key state without a window or real events (--script, --selftest).
+    // Mirrors what the GLFW callback does; call after update().
+    void setScriptedKey(int key, bool down);
+    void injectMouseDelta(const glm::vec2 &pixels);
 
     // Only true when ImGui wants the mouse (so clicks reach the overlay
     // instead of reaching gameplay handlers).
@@ -96,9 +109,10 @@ private:
 
     bool mouseCaptured_ = false;
     glm::vec2 mousePos_{};           // logical window coords
-    glm::vec2 mouseDelta_{};         // raw cursor movement this frame
+    glm::vec2 mouseDelta_{};         // raw cursor movement, un-consumed
     glm::vec2 scrollDelta_{};
     bool firstMouseSample_ = true;
+    bool rawMouseMotion_ = false;
 };
 
 } // namespace horror

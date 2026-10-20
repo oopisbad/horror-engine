@@ -84,16 +84,18 @@ void Input::cursorPosCallback(GLFWwindow *, double x, double y)
     Input *self = active_;
     if (!self)
         return;
-    glm::dvec2 pos(x, y);
+    const glm::vec2 pos(static_cast<float>(x), static_cast<float>(y));
     if (self->firstMouseSample_) {
-        // First callback ever: no delta (avoids a huge jump from the initial
-        // cursor position, classic FPS-input pitfall).
+        // First callback after capturing (or at startup): no delta, because
+        // the cursor may have jumped from anywhere to the window/capture
+        // position and that would snap the camera around.
         self->firstMouseSample_ = false;
-        self->mouseDelta_ = glm::vec2(0.0f);
     } else {
-        self->mouseDelta_ = glm::vec2(pos - glm::dvec2(self->mousePos_));
+        // Accumulate: several motion events can land in one frame, and a
+        // per-event overwrite silently drops pixels (jittery, light look).
+        self->mouseDelta_ += pos - self->mousePos_;
     }
-    self->mousePos_ = glm::vec2(pos);
+    self->mousePos_ = pos;
 }
 
 void Input::scrollCallback(GLFWwindow *, double dx, double dy)
@@ -104,20 +106,41 @@ void Input::scrollCallback(GLFWwindow *, double dx, double dy)
 
 void Input::update()
 {
-    // Roll this frame into "previous frame" for edge detection.
+    // Roll this frame into "previous frame" for edge detection. MUST run
+    // before glfwPollEvents: running it after the callbacks would snapshot the
+    // brand-new state into wasDown, which made pressed()/released() -- and
+    // therefore jump, F1, Esc and every other edge action -- permanently
+    // false.
     for (auto &k : keys_)
         k.wasDown = k.isDown;
     for (auto &b : buttons_)
         b.wasDown = b.isDown;
     scrollDelta_ = glm::vec2(0.0f);
+}
 
-    // When captured, GLFW gives continuous deltas with no cursor position
-    // reset needed; when free, we want the delta only while left-dragging
-    // (unused for now, but harmless to keep at zero).
-    if (mouseCaptured_ && mouseWantedByImGui)
-        // ImGui grabbed the mouse this frame; swallow the delta so clicking
-        // the overlay doesn't turn the camera.
-        mouseDelta_ = glm::vec2(0.0f);
+glm::vec2 Input::consumeMouseDelta()
+{
+    const glm::vec2 delta = mouseDelta_;
+    mouseDelta_ = glm::vec2(0.0f);
+    // Free cursor = UI navigation, not mouselook (otherwise opening the F1
+    // overlay and moving the mouse turns the camera behind it). ImGui owning
+    // the pointer counts as free too. No window at all = scripted harness,
+    // which injects deltas deliberately.
+    if (mouseWantedByImGui || (glfwWindow_ && !mouseCaptured_))
+        return glm::vec2(0.0f);
+    return delta;
+}
+
+void Input::setScriptedKey(int key, bool down)
+{
+    if (key < 0 || key > GLFW_KEY_LAST)
+        return;
+    keys_[key].isDown = down;
+}
+
+void Input::injectMouseDelta(const glm::vec2 &pixels)
+{
+    mouseDelta_ += pixels;
 }
 
 bool Input::held(Action a) const
@@ -184,7 +207,19 @@ void Input::setMouseCaptured(bool captured)
     // deltas still arrive through cursorPosCallback.
     glfwSetInputMode(glfwWindow_, GLFW_CURSOR,
         captured ? GLFW_CURSOR_DISABLED : GLFW_CURSOR_NORMAL);
-    firstMouseSample_ = true; // re-baseline next callback
+    // Raw motion bypasses cursor acceleration/clamping in the compositor, so
+    // the look maps 1:1 to physical mouse movement (no acceleration). Only
+    // valid while the cursor is disabled.
+    rawMouseMotion_ = captured && glfwRawMouseMotionSupported();
+    if (glfwRawMouseMotionSupported())
+        glfwSetInputMode(glfwWindow_, GLFW_RAW_MOUSE_MOTION,
+            rawMouseMotion_ ? GLFW_TRUE : GLFW_FALSE);
+    if (rawMouseMotion_)
+        HOR_LOG_DEBUG("raw mouse motion enabled");
+    // Re-baseline: the first position sample after a capture change is not a
+    // movement, and any pending delta belongs to the free-cursor era.
+    firstMouseSample_ = true;
+    mouseDelta_ = glm::vec2(0.0f);
 }
 
 const char *Input::actionName(Action a)

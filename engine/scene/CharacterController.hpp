@@ -24,6 +24,7 @@ public:
     struct Hooks {
         Camera *camera = nullptr; // camera to drive (yaw/pitch/bob/eye pos)
         Input *input = nullptr;
+        bool logSteps = false;    // --debug-input: one trace line per fixed step
     };
 
     // One fixed step. Reads input, integrates + resolves the entity's world

@@ -11,13 +11,21 @@
 
 #include <glm/gtc/quaternion.hpp>
 
+#include <algorithm>
 #include <cstdlib>
 #include <cstring>
+#include <initializer_list>
+#include <sstream>
 #include <string>
+#include <string_view>
+#include <vector>
 
 namespace {
 
 using namespace horror;
+
+// Top face of the corridor floor slab (local half-thickness 0.05, rotated flat).
+constexpr float kFloorTopY = 0.05f;
 
 // ---- test-scene construction -------------------------------------------------
 // Procedural placeholders only (no assets yet): a dark test corridor, some
@@ -29,7 +37,11 @@ void buildTestScene(Application &app)
 
     // Mesh pool: primitives made once and shared by every instance.
     Mesh *cube = scene.addMesh(std::make_unique<Mesh>(Mesh::makeCube(0.5f, "cube")));
-    Mesh *floor = scene.addMesh(std::make_unique<Mesh>(Mesh::makePlane(8.0f, 4, "floor")));
+    // Half-extent 12 (24x24) so the slab reaches under the far wall at z=-10.5;
+    // the old 16x16 floor ended at z=-8 and the player fell off the level just
+    // before the corridor end. Mesh and collider share the same constant.
+    constexpr float kFloorHalfExtent = 12.0f;
+    Mesh *floor = scene.addMesh(std::make_unique<Mesh>(Mesh::makePlane(kFloorHalfExtent, 4, "floor")));
     Mesh *ball = scene.addMesh(std::make_unique<Mesh>(Mesh::makeSphere(0.3f, "ball")));
 
     // A handy material-factory lambda to keep call sites terse.
@@ -51,17 +63,23 @@ void buildTestScene(Application &app)
         t.rotation = glm::quat(glm::vec3(glm::radians(-90.0f), 0.0f, 0.0f));
         // Half-extents are authored in the entity's local space, so the 0.05m
         // slab thickness is local Z (which the rotation maps to world Y).
-        scene.add(f, AABBCollider{ glm::vec3(0.0f), glm::vec3(8.0f, 8.0f, 0.05f), {}, {}, true });
+        scene.add(f, AABBCollider{ glm::vec3(0.0f),
+            glm::vec3(kFloorHalfExtent, kFloorHalfExtent, 0.05f), {}, {}, true });
     }
 
     // Corridor walls: long thin boxes; doubles as collision geometry.
+    // The collider is authored in the entity's LOCAL space, so its half-extents
+    // are the unit cube's half size (0.5) and the transform's scale turns them
+    // into the world `half`. Passing `half` here would double-apply the scale
+    // (collision boxes were scale² too small/thin -- walls 4 cm thick).
+    constexpr glm::vec3 kUnitCubeHalf(0.5f);
     const auto wall = [&](const char *name, const glm::vec3 &pos, const glm::vec3 &half, const glm::vec3 &albedo) {
         EntityId e = scene.create(name);
         scene.add(e, MeshRenderer{ cube, mat(albedo, 0.9f), true, true });
         Transform &t = scene.transform(e);
         t.position = pos;
         t.scale = half * 2.0f; // cube is unit-space, so scale == full extents
-        scene.add(e, AABBCollider{ glm::vec3(0.0f), half, {}, {}, true });
+        scene.add(e, AABBCollider{ glm::vec3(0.0f), kUnitCubeHalf, {}, {}, true });
         return e;
     };
 
@@ -78,7 +96,8 @@ void buildTestScene(Application &app)
         scene.add(e, MeshRenderer{ cube, mat(albedo, 0.75f), true, true });
         scene.transform(e).position = pos;
         scene.transform(e).scale = glm::vec3(scale);
-        scene.add(e, AABBCollider{ glm::vec3(0.0f), glm::vec3(scale * 0.5f), {}, {}, true });
+        // Local half of the unit cube; the transform scale supplies the size.
+        scene.add(e, AABBCollider{ glm::vec3(0.0f), kUnitCubeHalf, {}, {}, true });
         return e;
     };
     crate("crate-1", { 0.9f, 0.25f, -3.2f }, 0.5f, { 0.45f, 0.32f, 0.20f });
@@ -107,11 +126,14 @@ void buildTestScene(Application &app)
         scene.add(e, PointLight{ glm::vec3(1.0f, 0.15f, 0.1f), 10.0f, 0.2f, 6.0f, false });
     }
 
-    // Player: feet at (0,0,0.0); the controller ticks it every fixed step.
+    // Player: feet on the floor slab's top face so the spawn is not inside
+    // collider geometry (the controller overwrites the camera position from
+    // the feet every fixed step, so this is the only spawn that matters).
     EntityId player = scene.create("player");
     scene.add(player, CharacterController{});
+    scene.transform(player).position = { 0.0f, kFloorTopY, 1.8f };
     app.camera().fovY = 75.0f;
-    app.camera().position = { 0.0f, 1.62f, 1.8f };
+    app.camera().position = { 0.0f, kFloorTopY + 1.62f, 1.8f };
     app.camera().yaw = 0.0f;   // looking down -Z into the corridor
     app.camera().pitch = -0.05f;
 
@@ -149,6 +171,361 @@ void spawnGltfLevel(Application &app, const char *path, const glm::vec3 &positio
     });
 }
 
+// ---- scripted input / self-test ---------------------------------------------
+// Movement is debugged with data, not by eye: the harness drives the real
+// fixed step with synthetic key/mouse state and asserts on positions.
+
+int keyFromName(std::string_view name)
+{
+    if (name == "W") return GLFW_KEY_W;
+    if (name == "A") return GLFW_KEY_A;
+    if (name == "S") return GLFW_KEY_S;
+    if (name == "D") return GLFW_KEY_D;
+    if (name == "SPACE") return GLFW_KEY_SPACE;
+    if (name == "SHIFT") return GLFW_KEY_LEFT_SHIFT;
+    if (name == "CTRL" || name == "CONTROL") return GLFW_KEY_LEFT_CONTROL;
+    return GLFW_KEY_UNKNOWN;
+}
+
+// Every key the harness is allowed to drive; cleared each frame unless held.
+const std::vector<int> &scriptableKeys()
+{
+    static const std::vector<int> keys = {
+        GLFW_KEY_W, GLFW_KEY_A, GLFW_KEY_S, GLFW_KEY_D,
+        GLFW_KEY_SPACE, GLFW_KEY_LEFT_SHIFT, GLFW_KEY_LEFT_CONTROL
+    };
+    return keys;
+}
+
+// One simulated frame = roll input edges, apply scripted key state (what
+// glfwPollEvents would deliver), then run exactly one fixed step.
+struct InputHarness {
+    Application &app;
+    EntityId player = 0;
+    CharacterSystem::Hooks hooks;
+    float dt = 1.0f / 60.0f;
+    std::vector<int> held;
+
+    void set(std::initializer_list<int> keys) { held.assign(keys.begin(), keys.end()); }
+    [[nodiscard]] bool down(int key) const
+    {
+        return std::find(held.begin(), held.end(), key) != held.end();
+    }
+
+    void step(const glm::vec2 &mouse = glm::vec2(0.0f))
+    {
+        Input &in = app.input();
+        in.update();
+        for (int key : scriptableKeys())
+            in.setScriptedKey(key, down(key));
+        if (mouse.x != 0.0f || mouse.y != 0.0f)
+            in.injectMouseDelta(mouse);
+        CharacterSystem::step(app.scene(), player, hooks, dt);
+    }
+
+    void releaseAll()
+    {
+        held.clear();
+        for (int key : scriptableKeys())
+            app.input().setScriptedKey(key, false);
+    }
+};
+
+// Puts the character back on its feet with no momentum and a level camera.
+void resetCharacter(Application &app, EntityId player, const glm::vec3 &feet)
+{
+    Scene &scene = app.scene();
+    scene.transform(player).position = feet;
+    if (CharacterController *cc = scene.find<CharacterController>(player)) {
+        cc->velocity = glm::vec3(0.0f);
+        cc->lastPush = glm::vec3(0.0f);
+        cc->grounded = false;
+        cc->crouching = false;
+        cc->currentHeight = cc->height;
+        cc->bobPhase = 0.0f;
+        cc->bobOffset = glm::vec3(0.0f);
+        cc->bobRoll = 0.0f;
+    }
+    Camera &cam = app.camera();
+    cam.position = feet + glm::vec3(0.0f, 1.62f, 0.0f);
+    cam.yaw = 0.0f;
+    cam.pitch = 0.0f;
+    cam.bobOffset = glm::vec3(0.0f);
+    cam.bobRoll = 0.0f;
+}
+
+// --script "hold W 60; wait 30; mouse 120 0; hold S+SHIFT 60"
+void runScript(Application &app, EntityId player, float dt, const std::string &script,
+    bool verbose)
+{
+    InputHarness h{ app, player, {}, dt };
+    h.hooks.camera = &app.camera();
+    h.hooks.input = &app.input();
+    h.hooks.logSteps = verbose;
+
+    const glm::vec3 start = app.scene().transform(player).position;
+    std::istringstream lines(script);
+    std::string command;
+    while (std::getline(lines, command, ';')) {
+        std::istringstream words(command);
+        std::string verb;
+        if (!(words >> verb))
+            continue;
+        if (verb == "hold") {
+            std::string keys;
+            int steps = 60;
+            if (!(words >> keys)) {
+                HOR_LOG_WARN("script: 'hold' needs a key");
+                continue;
+            }
+            if (!(words >> steps))
+                steps = 60;
+            std::istringstream keyList(keys);
+            std::string keyName;
+            std::vector<int> pressed;
+            while (std::getline(keyList, keyName, '+')) {
+                const int key = keyFromName(keyName);
+                if (key == GLFW_KEY_UNKNOWN)
+                    HOR_LOG_WARN("script: unknown key '{}'", keyName);
+                else {
+                    h.held.push_back(key);
+                    pressed.push_back(key);
+                }
+            }
+            for (int i = 0; i < steps; ++i)
+                h.step();
+            for (int key : pressed)
+                std::erase(h.held, key); // hold = press for N steps only
+        } else if (verb == "release") {
+            std::string keys;
+            if (words >> keys) {
+                std::istringstream keyList(keys);
+                std::string keyName;
+                while (std::getline(keyList, keyName, '+'))
+                    std::erase(h.held, keyFromName(keyName));
+            }
+        } else if (verb == "wait") {
+            int steps = 1;
+            words >> steps;
+            for (int i = 0; i < steps; ++i)
+                h.step();
+        } else if (verb == "mouse") {
+            float dx = 0.0f, dy = 0.0f;
+            words >> dx >> dy;
+            h.step({ dx, dy });
+        } else {
+            HOR_LOG_WARN("script: unknown command '{}'", verb);
+        }
+    }
+    h.releaseAll();
+    const glm::vec3 end = app.scene().transform(player).position;
+    HOR_LOG_INFO("script done: player ({:.3f},{:.3f},{:.3f}) -> ({:.3f},{:.3f},{:.3f})",
+        start.x, start.y, start.z, end.x, end.y, end.z);
+}
+
+// Scripted movement matrix. Returns the number of failed checks.
+int runSelfTest(Application &app, EntityId player, float dt)
+{
+    Scene &scene = app.scene();
+    Camera &cam = app.camera();
+    InputHarness h{ app, player, {}, dt };
+    h.hooks.camera = &cam;
+    h.hooks.input = &app.input();
+
+    // Private platform far from the corridor: flat, wall-free, one second of
+    // travel in every direction. Destroyed before the game starts rendering.
+    EntityId pad = scene.create("selftest-pad");
+    scene.transform(pad).position = { 100.0f, -0.05f, 100.0f };
+    scene.add(pad, AABBCollider{ glm::vec3(0.0f), glm::vec3(8.0f, 0.05f, 8.0f), {}, {}, true });
+    scene.updateWorldMatrices();
+    scene.refreshColliderBounds();
+
+    const glm::vec3 padSpawn{ 100.0f, 0.0f, 100.0f };
+    constexpr int kSteps = 60; // one second at the fixed step
+    constexpr float kJumpLimit = 0.2f; // no single step may move further than this
+
+    int checked = 0;
+    int failed = 0;
+    auto report = [&](const char *name, bool pass, const std::string &detail) {
+        ++checked;
+        if (!pass)
+            ++failed;
+        HOR_LOG_INFO("[selftest] {:<16} {}  {}", name, pass ? "PASS" : "FAIL", detail);
+    };
+
+    struct MoveCase {
+        const char *name;
+        std::vector<int> keys;
+        glm::vec3 dir;
+        float speed;
+    };
+    const glm::vec3 diagonal = glm::normalize(glm::vec3(1.0f, 0.0f, -1.0f));
+    const std::vector<MoveCase> cases = {
+        { "walk W", { GLFW_KEY_W }, { 0.0f, 0.0f, -1.0f }, 2.4f },
+        { "walk S", { GLFW_KEY_S }, { 0.0f, 0.0f, 1.0f }, 2.4f },
+        { "walk A", { GLFW_KEY_A }, { -1.0f, 0.0f, 0.0f }, 2.4f },
+        { "walk D", { GLFW_KEY_D }, { 1.0f, 0.0f, 0.0f }, 2.4f },
+        { "diagonal W+D", { GLFW_KEY_W, GLFW_KEY_D }, diagonal, 2.4f },
+        { "sprint W", { GLFW_KEY_W, GLFW_KEY_LEFT_SHIFT }, { 0.0f, 0.0f, -1.0f }, 4.6f },
+        { "crouch W", { GLFW_KEY_W, GLFW_KEY_LEFT_CONTROL }, { 0.0f, 0.0f, -1.0f }, 1.2f },
+    };
+
+    for (const MoveCase &c : cases) {
+        resetCharacter(app, player, padSpawn);
+        h.held = c.keys;
+        glm::vec3 prev = padSpawn;
+        float maxStep = 0.0f;
+        for (int i = 0; i < kSteps; ++i) {
+            h.step();
+            const glm::vec3 p = scene.transform(player).position;
+            maxStep = std::max(maxStep, glm::length(p - prev));
+            prev = p;
+        }
+        const glm::vec3 disp = scene.transform(player).position - padSpawn;
+        const glm::vec3 flat(disp.x, 0.0f, disp.z);
+        const float along = glm::dot(flat, c.dir);
+        const float lateral = glm::length(flat - c.dir * along);
+        const float expected = c.speed * kSteps * dt; // acceleration ramp costs ~5%
+        const CharacterController *cc = scene.find<CharacterController>(player);
+        const bool pass = along > expected * 0.85f && along < expected * 1.10f
+            && lateral < 0.02f && maxStep < kJumpLimit && std::abs(disp.y) < 0.01f
+            && cc && cc->grounded;
+        std::ostringstream detail;
+        detail << "along=" << along << " expected~" << expected << " lateral=" << lateral
+               << " maxStep=" << maxStep << " grounded=" << (cc && cc->grounded);
+        report(c.name, pass, detail.str());
+    }
+
+    // Idle: this is the regression check for the WASD teleport (standing on the
+    // floor used to be resolved as a horizontal collision against a 16 m box).
+    {
+        resetCharacter(app, player, padSpawn);
+        h.held.clear();
+        float maxStep = 0.0f;
+        glm::vec3 prev = padSpawn;
+        for (int i = 0; i < kSteps; ++i) {
+            h.step();
+            const glm::vec3 p = scene.transform(player).position;
+            maxStep = std::max(maxStep, glm::length(p - prev));
+            prev = p;
+        }
+        const glm::vec3 end = scene.transform(player).position;
+        const CharacterController *cc = scene.find<CharacterController>(player);
+        std::ostringstream detail;
+        detail << "drift=" << glm::length(end - padSpawn) << " maxStep=" << maxStep
+               << " grounded=" << (cc && cc->grounded);
+        report("idle", glm::length(end - padSpawn) < 1e-3f && maxStep < 1e-3f && cc
+                && cc->grounded, detail.str());
+    }
+
+    // Jump: settle, press for one step, then simulate 1.5 s of air time.
+    {
+        resetCharacter(app, player, padSpawn);
+        h.held.clear();
+        for (int i = 0; i < 5; ++i)
+            h.step();
+        h.held = { GLFW_KEY_SPACE };
+        h.step();
+        h.held.clear();
+        float peak = 0.0f;
+        float maxStep = 0.0f;
+        glm::vec3 prev = scene.transform(player).position;
+        for (int i = 0; i < 90; ++i) {
+            h.step();
+            const glm::vec3 p = scene.transform(player).position;
+            peak = std::max(peak, p.y);
+            maxStep = std::max(maxStep, glm::length(p - prev));
+            prev = p;
+        }
+        const CharacterController *cc = scene.find<CharacterController>(player);
+        const glm::vec3 end = scene.transform(player).position;
+        std::ostringstream detail;
+        detail << "peak=" << peak << " landed_y=" << end.y
+               << " maxStep=" << maxStep << " grounded=" << (cc && cc->grounded);
+        report("jump", peak > 0.8f && peak < 1.6f && maxStep < kJumpLimit
+                && std::abs(end.y - padSpawn.y) < 0.01f && cc && cc->grounded,
+            detail.str());
+    }
+
+    // Corridor: walk straight into the far wall; must stop at the face and not
+    // tunnel through or slide off-axis.
+    {
+        const glm::vec3 corridorSpawn{ 0.0f, kFloorTopY, 0.0f };
+        resetCharacter(app, player, corridorSpawn);
+        h.held = { GLFW_KEY_W };
+        float maxStep = 0.0f;
+        glm::vec3 prev = corridorSpawn;
+        for (int i = 0; i < 400; ++i) {
+            h.step();
+            const glm::vec3 p = scene.transform(player).position;
+            maxStep = std::max(maxStep, glm::length(p - prev));
+            prev = p;
+        }
+        const glm::vec3 end = scene.transform(player).position;
+        const CharacterController *cc = scene.find<CharacterController>(player);
+        std::ostringstream detail;
+        detail << "end=(" << end.x << "," << end.y << "," << end.z << ")"
+               << " maxStep=" << maxStep << " grounded=" << (cc && cc->grounded);
+        report("wall stop", end.z < -9.95f && end.z > -10.1f && std::abs(end.x) < 0.01f
+                && maxStep < kJumpLimit && cc && cc->grounded, detail.str());
+    }
+
+    // Mouse convention: right turns right, up looks up (and invert Y flips it).
+    constexpr float kMouseX = 120.0f;
+    auto mouseReport = [&](const char *name, bool pass, const glm::vec3 &f, float yaw,
+                            float pitch) {
+        std::ostringstream detail;
+        detail << "forward=(" << f.x << "," << f.y << "," << f.z << ") yaw=" << yaw
+               << " pitch=" << pitch;
+        report(name, pass, detail.str());
+    };
+    {
+        resetCharacter(app, player, padSpawn);
+        h.held.clear();
+        h.step({ kMouseX, 0.0f });
+        mouseReport("mouse right", cam.forward().x > 0.15f, cam.forward(), cam.yaw, cam.pitch);
+
+        resetCharacter(app, player, padSpawn);
+        h.step({ 0.0f, -kMouseX });
+        mouseReport("mouse up", cam.forward().y > 0.15f, cam.forward(), cam.yaw, cam.pitch);
+
+        if (CharacterController *cc = scene.find<CharacterController>(player)) {
+            cc->invertY = true;
+            resetCharacter(app, player, padSpawn);
+            h.step({ 0.0f, -kMouseX });
+            mouseReport("invert Y", cam.pitch < -0.1f, cam.forward(), cam.yaw, cam.pitch);
+            cc->invertY = false;
+        }
+    }
+
+    // Key edges: update() must snapshot the *previous* frame, not the state
+    // this frame's events just wrote (jump, F1, P, O, V and Esc were dead).
+    {
+        Input &in = app.input();
+        in.setScriptedKey(GLFW_KEY_F1, false);
+        in.update();                              // frame boundary (no event yet)
+        in.setScriptedKey(GLFW_KEY_F1, true);     // press event arrives
+        const bool pressEdge = in.pressed(Action::ToggleDebugUI) && in.held(Action::ToggleDebugUI);
+        in.update();                              // next frame, key still down
+        const bool heldOnly = in.held(Action::ToggleDebugUI) && !in.pressed(Action::ToggleDebugUI);
+        in.update();                              // frame boundary, still down
+        in.setScriptedKey(GLFW_KEY_F1, false);    // release event arrives
+        const bool releaseEdge = in.released(Action::ToggleDebugUI);
+        report("key edges", pressEdge && heldOnly && releaseEdge,
+            "pressed/held/released = " + std::to_string(pressEdge) + "/"
+                + std::to_string(heldOnly) + "/" + std::to_string(releaseEdge));
+    }
+
+    scene.destroy(pad);
+    h.releaseAll();
+    resetCharacter(app, player, { 0.0f, kFloorTopY, 1.8f });
+    scene.updateWorldMatrices();
+    scene.refreshColliderBounds();
+
+    HOR_LOG_INFO("[selftest] {} of {} checks passed", checked - failed, checked);
+    return failed;
+}
+
 } // namespace
 
 int main(int argc, char **argv)
@@ -161,6 +538,9 @@ int main(int argc, char **argv)
     int frameLimit = 0;
     int screenshotFrame = 29;
     std::string screenshotPath;
+    std::string script;      // --script: scripted input before the main loop
+    bool selftest = false;   // --selftest: scripted movement/mouse assertions
+    bool debugInput = false; // --debug-input: per-step/per-frame input trace
     for (int i = 1; i < argc; ++i) {
         const std::string a = argv[i];
         auto value = [&]() -> const char * { return i + 1 < argc ? argv[++i] : ""; };
@@ -182,6 +562,12 @@ int main(int argc, char **argv)
             cfg.shadowMapSize = static_cast<uint32_t>(std::atoi(value()));
         else if (a == "--ui")
             cfg.windowTitle = value();
+        else if (a == "--script")
+            script = value();
+        else if (a == "--selftest")
+            selftest = true;
+        else if (a == "--debug-input")
+            debugInput = true;
     }
 
     Application app{ cfg };
@@ -212,7 +598,19 @@ int main(int argc, char **argv)
                 flashlight = static_cast<EntityId>(i);
         }
     }
-    CharacterSystem::Hooks hooks{ &app.camera(), &app.input() };
+    CharacterSystem::Hooks hooks{ &app.camera(), &app.input(), debugInput };
+
+    // Scripted runs happen before the render loop; the scene's static colliders
+    // need world bounds by then, which Application only refreshes at loop start.
+    app.scene().updateWorldMatrices();
+    app.scene().refreshColliderBounds();
+    if (selftest) {
+        const int failures = runSelfTest(app, player, cfg.fixedStepSeconds);
+        return failures == 0 ? 0 : 1;
+    }
+    if (!script.empty())
+        runScript(app, player, cfg.fixedStepSeconds, script, debugInput);
+
     app.onFixedStep = [&](float dt) {
         CharacterSystem::step(app.scene(), player, hooks, dt);
 
@@ -235,9 +633,17 @@ int main(int argc, char **argv)
     // controller); documented extension point for gameplay animations.
     // Screenshot capture is deferred ~30 frames so startup (shadow map init,
     // ImGui font bake) has definitely settled before the image is read back.
-    app.onFrameUpdate = [&app, player, flashlight, &screenshotPath, screenshotFrame](float) {
+    app.onFrameUpdate = [&app, player, flashlight, &screenshotPath, screenshotFrame, debugInput](float frameDt) {
         (void)player;
         (void)flashlight;
+        if (debugInput) {
+            // Mouse is consumed by the fixed step, so this shows what is still
+            // pending plus the resulting orientation for this frame.
+            const glm::vec2 pending = app.input().mouseDelta();
+            HOR_LOG_INFO("[frame] {} dt={:.4f} pendingMouse=({:+.1f},{:+.1f}) yaw={:.4f} pitch={:.4f}",
+                app.framesRun(), frameDt, pending.x, pending.y,
+                app.camera().yaw, app.camera().pitch);
+        }
         if (!screenshotPath.empty() && app.framesRun() == screenshotFrame)
             app.requestScreenshot(screenshotPath);
         if (app.framesRun() == 30) {

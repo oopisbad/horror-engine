@@ -39,11 +39,19 @@ Application::~Application()
 
 int Application::run()
 {
+    // The fixed step may run before the first render pass; give every collider
+    // real world bounds up front, otherwise the first steps test zero-size
+    // boxes sitting at the origin.
+    scene_.updateWorldMatrices();
+    scene_.refreshColliderBounds();
+
     while (running_ && !window_.shouldClose()) {
         const float frameDt = frameTimer_.tickRealtime();
         elapsed_ += frameDt;
-        window_.pollEvents();
+        // Edge state rolls BEFORE new events arrive (pressed/released compare
+        // this frame against the previous one; see Input::update).
         input_.update();
+        window_.pollEvents();
 
         handleHotkeys();
 

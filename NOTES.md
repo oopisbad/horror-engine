@@ -27,16 +27,39 @@ previous working program).
 
 ```
 ./build/game [--w N] [--h N] [--vsync on|off] [--fullscreen]
-             [--frames N] [--screenshot out.tga] [--shadow N] [--ui title]
+             [--frames N] [--screenshot out.tga] [--shot-frame N] [--shadow N]
+             [--ui title] [--debug-input] [--script "..."] [--selftest]
 ```
 
 `--frames N` exits after N frames and `--screenshot` writes a TGA after ~30
 frames, which is how rendering changes are smoke-tested headlessly.
 
+Input debugging (added in the movement/mouse pass):
+
+- `--debug-input` logs one line per fixed step (position, velocity, grounded,
+  input axes, consumed mouse delta, yaw/pitch, collision push-out vector) plus
+  one per frame (pending mouse delta, yaw/pitch).
+- `--script "hold W 60; wait 30; mouse 120 0"` drives the real fixed step with
+  synthetic input before the render loop. Commands: `hold <KEY[+KEY]> <steps>`,
+  `release <KEY>`, `wait <steps>`, `mouse <dx> <dy>`. Keys: W A S D SPACE SHIFT
+  CTRL. `hold` presses for exactly N steps, then releases.
+- `--selftest` runs the scripted assertion matrix (walk W/A/S/D, diagonal,
+  sprint, crouch, idle, jump, wall stop, mouse right/up/invert, key edges) on a
+  private platform away from the corridor and exits non-zero on failure. It
+  needs a GL window (Application owns the scene/camera), so it is scripted
+  rather than fully headless.
+
 ### Controls
 
 `WASD` move, mouse look (captured), `Shift` sprint, `Ctrl/C` crouch, `Space`
 jump, `F1` overlay, `P` wireframe, `O` debug draw, `V` vsync, `Esc` quit.
+
+Mouse convention: mouse right turns right, mouse up looks up, no acceleration
+(GLFW raw mouse motion is enabled when the platform supports it). Look
+sensitivity and an `invert Y` checkbox live in the F1 overlay; both are stored
+on the `CharacterController` component (`mouseLookSensitivity`, `invertY`).
+Camera yaw is counter-clockwise positive, so the controller *subtracts* the
+horizontal delta.
 
 ## Architecture
 
@@ -236,13 +259,58 @@ Deliberate choices worth knowing:
 12. **Film grain was applied before gamma** — in the near-black scene the
     encode amplified the linear noise into TV static. Grain is now applied
     after the gamma encode.
+13. **WASD made the player teleport** — the axis-separated resolver pushed out
+    along the nearest face on the axis being moved, for *every* overlapping
+    box. While grounded the body overlaps the floor slab on Y, so any X/Z
+    motion also "collided" with the 24 m floor and the push-out moved the
+    player to the slab edge (metres away). Resolution is now swept: a box can
+    only block an axis if the body was outside that box's extent on that axis
+    *before* the move. The Y push-out also had a feet-origin vs box-centre
+    offset bug (it moved the feet up by half a body height per contact).
+14. **Collision boxes were scale² too small** — `wall()`/`crate()` authored
+    world-space half extents in `AABBCollider`, which is *local* space, and the
+    entity's scale (sized for the unit cube) re-applied them: corridor walls
+    ended up 4 cm thick and 10 m tall, crates half their visible size. The
+    helpers now store the unit cube's local half (0.5); the transform supplies
+    the world size. (Follow-up to bug 2.)
+15. **Floor stopped short of the corridor end** — the slab was 16×16 and ended
+    at z=-8 while the far wall sits at z=-10.5, so walking to the end dropped
+    the player out of the level. Mesh + collider now share a 24×24 half-extent
+    constant. (Second follow-up to bug 2.)
+16. **Spawn was inside the floor** — the player entity started at y=0, 5 cm
+    inside the slab, and the camera's authored (0,1.62,1.8) was overwritten by
+    the controller on the first step. The feet spawn on the slab's top face
+    (y=0.05) at z=1.8; the camera is derived from the feet.
+17. **Mouselook was frame-rate dependent and yaw was inverted** — the fixed
+    step read (never consumed) the per-frame delta, so a frame running two
+    steps applied the same motion twice and a frame running none applied
+    nothing. Deltas now accumulate in `Input` and are consumed exactly once per
+    fixed step; `yaw += dx` (turn left on rightward motion) became
+    `yaw -= dx`; raw mouse motion is enabled; free-cursor motion no longer
+    turns the camera; sensitivity + invert-Y live in the F1 overlay. Vertical
+    was already up-positive and was re-verified numerically and by screenshot
+    (looking down shows the lit floor, looking up is black).
+18. **Every key edge was dead** — `Input::update()` rolled `wasDown = isDown`
+    *after* `glfwPollEvents`, i.e. it snapshotted the brand-new state, so
+    `pressed()`/`released()` compared a key against itself and were always
+    false. Jump, F1, P, O, V and Esc never fired. update() now runs at the top
+    of the frame, before events (documented in the header).
+19. **Colliders had zero bounds during the first fixed steps** —
+    `refreshColliderBounds()` ran after the first gameplay steps, so the first
+    steps tested degenerate boxes at the origin. Bounds are refreshed once
+    before the loop.
 
 ## Known issues / TODO
 
 - Point lights do not cast shadows (only the flashlight).
 - No normal mapping yet; `Mesh` has no tangent attribute until step 2.
 - AABB collision has no step-offset, slopes, or moving platforms; sub-step
-  tunneling is only bounded by the fixed 1/60 s step.
+  tunneling is only bounded by the fixed 1/60 s step (step-offset and sub-step
+  protection are the next task).
+- Collision resolution only blocks *entering* a face; a body spawned deeply
+  inside geometry is not depenetrated (would need a push-to-nearest-face pass).
+- `--selftest` needs a display because Application owns the window; a truly
+  headless harness would need the scene/controller split out of Application.
 - The post pass is a single composite; there is no bloom/SSAO chain yet.
 - The imported test models read very dark in-game by design (ambient is
   near-black): point the flashlight at them, or raise ambient/post exposure in

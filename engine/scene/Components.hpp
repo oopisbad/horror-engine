@@ -132,9 +132,11 @@ struct CharacterController {
     float jumpSpeed = 5.5f;
 
     float mouseLookSensitivity = 0.0022f; // radians of yaw per pixel
+    bool invertY = false;                 // F1 overlay toggle: mouse up looks down
 
     // Runtime state (not authored).
     glm::vec3 velocity{0.0f};
+    glm::vec3 lastPush{0.0f};      // debug: collision push-out applied by the last step
     bool grounded = false;
     bool crouching = false;
     float currentHeight = 1.75f;   // smoothly lerps toward target height

@@ -101,6 +101,20 @@ void ImGuiOverlay::drawDebugWindows(Application &app)
         ImGui::Text("yaw/pitch:       %.1f / %.1f degrees",
             glm::degrees(cam.yaw), glm::degrees(cam.pitch));
 
+        // Mouse-look feel lives on the controller component, so the overlay
+        // edits it in place instead of inventing a parallel settings struct.
+        ImGui::Separator();
+        ImGui::Text("mouse look");
+        app.scene().view<CharacterController>([&](EntityId id, CharacterController &cc) {
+            ImGui::PushID(static_cast<int>(id));
+            // rad/pixel, shown as degrees per pixel so the number is readable.
+            float degPerPixel = glm::degrees(cc.mouseLookSensitivity);
+            if (ImGui::SliderFloat("sensitivity", &degPerPixel, 0.02f, 0.35f, "%.3f deg/px"))
+                cc.mouseLookSensitivity = glm::radians(degPerPixel);
+            ImGui::Checkbox("invert Y", &cc.invertY);
+            ImGui::PopID();
+        });
+
         ImGui::Separator();
         auto &renderer = app.renderer();
         bool wire = renderer.wireframe();
