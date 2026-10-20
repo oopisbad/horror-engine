@@ -40,6 +40,15 @@ ForwardRenderer::ForwardRenderer(uint32_t shadowMapSize)
     // GL 4.5 core requires a bound VAO even for an attribute-less draw.
     glCreateVertexArrays(1, &fullscreenVao_);
 
+    // One magenta texel bound for every material texture slot without a map.
+    // Owned by the renderer (an engine-lifetime object created while the GL
+    // context is current) instead of a function-local static, which used to be
+    // destroyed after the context during static destruction.
+    const uint8_t magenta[4] = { 255, 0, 255, 255 };
+    placeholder_ = std::make_unique<Texture>(GL_RGBA8, 1, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE,
+        magenta,
+        Texture::Params{ GL_NEAREST, GL_NEAREST, GL_REPEAT, GL_REPEAT, false });
+
     queue_.reserve(256);
     stats_.shadowResolution = static_cast<float>(shadowMapSize);
     HOR_LOG_DEBUG("forward renderer ready (shadow map {}x{})", shadowMapSize, shadowMapSize);
@@ -381,7 +390,7 @@ void ForwardRenderer::mainPass(Scene &scene, Camera &camera)
                 item.material->baseColorTex->bind(3);
                 shader.setUniform("uHasBaseColorTex", 1);
             } else {
-                Texture::placeholder().bind(3);
+                placeholder_->bind(3);
                 shader.setUniform("uHasBaseColorTex", 0);
             }
             shader.setUniform("uBaseColorTex", 3);
@@ -391,7 +400,7 @@ void ForwardRenderer::mainPass(Scene &scene, Camera &camera)
                 item.material->normalTex->bind(4);
                 shader.setUniform("uHasNormalTex", 1);
             } else {
-                Texture::placeholder().bind(4);
+                placeholder_->bind(4);
                 shader.setUniform("uHasNormalTex", 0);
             }
             shader.setUniform("uNormalTex", 4);
@@ -401,7 +410,7 @@ void ForwardRenderer::mainPass(Scene &scene, Camera &camera)
                 item.material->metallicRoughnessTex->bind(5);
                 shader.setUniform("uHasMetallicRoughnessTex", 1);
             } else {
-                Texture::placeholder().bind(5);
+                placeholder_->bind(5);
                 shader.setUniform("uHasMetallicRoughnessTex", 0);
             }
             shader.setUniform("uMetallicRoughnessTex", 5);

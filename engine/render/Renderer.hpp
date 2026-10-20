@@ -18,6 +18,7 @@ class Shader;
 class Framebuffer;
 class DebugDraw;
 class Mesh;
+class Texture;
 struct Material;
 struct MeshRenderer;
 
@@ -138,6 +139,9 @@ private:
 
     std::unique_ptr<Framebuffer> shadowTarget_; // depth-only, flashlight view
     std::unique_ptr<Framebuffer> sceneTarget_;  // HDR color + depth, post input
+    // 1x1 magenta fallback bound for material slots without a texture. Owned
+    // here so its GL name dies with the renderer (context still current).
+    std::unique_ptr<Texture> placeholder_;
     GLuint fullscreenVao_ = 0;                  // attribute-less post draw
     std::vector<RenderItem> queue_;
 

@@ -95,8 +95,8 @@ Deliberate choices worth knowing:
   (`updateWorldMatrices`) with a depth cap to survive accidental cycles.
 - **Rendering** is forward, single lit shader, uniforms per draw. Materials
   sample base color (unit 3), normal map (unit 4) and metallic-roughness
-  (unit 5); a missing map binds `Texture::placeholder()` with a `uHas*Tex`
-  flag so one shader serves both cases. The scene
+  (unit 5); a missing map binds the renderer-owned 1x1 magenta placeholder
+  with a `uHas*Tex` flag so one shader serves both cases. The scene
   renders into an **HDR RGBA16F Framebuffer** with depth; a fullscreen
   triangle then applies fog (from depth), exposure, ACES tonemap, vignette,
   film grain and gamma. The shadow map (depth-only FBO) is produced by the
@@ -321,7 +321,6 @@ Deliberate choices worth knowing:
 - The imported test models read very dark in-game by design (ambient is
   near-black): point the flashlight at them, or raise ambient/post exposure in
   the F1 overlay when inspecting them.
-- `Texture::placeholder()` is a function-local static destroyed at process
-  exit, after the GL context is gone (harmless today, but should become an
-  engine-lifetime owned object).
+- The placeholder texture is now owned by `ForwardRenderer` (destroyed while
+  the GL context is current); `Texture` has no statics left.
 - Sound, UI/gameplay menus and AI are out of scope for now.

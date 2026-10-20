@@ -124,19 +124,4 @@ void Texture::bind(GLuint unit) const
     glBindTextureUnit(unit, texture_);
 }
 
-const Texture &Texture::placeholder()
-{
-    // Local static lambda: the GL context is guaranteed current by the time
-    // any rendering code runs, so lazy init here is safe.
-    static Texture t = [] {
-        Texture t(
-            GL_RGBA8, 1, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, nullptr,
-            Params{ GL_NEAREST, GL_NEAREST, GL_REPEAT, GL_REPEAT, false });
-        const uint8_t magenta[4] = { 255, 0, 255, 255 };
-        glTextureSubImage2D(t.texture_, 0, 0, 0, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, magenta);
-        return t;
-    }();
-    return t;
-}
-
 } // namespace horror

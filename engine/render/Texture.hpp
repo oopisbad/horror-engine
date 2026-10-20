@@ -11,6 +11,10 @@ namespace horror {
 // Simple 2D texture wrapper (sampler state included). stb_image loads the
 // file when one exists; otherwise a magenta 1x1 placeholder is created so a
 // missing file is visible in-scene instead of silently showing black.
+//
+// Texture owns a GL name, so it must be created/destroyed while the GL context
+// is current; nothing here is static. The renderer owns the shared material
+// placeholder (see ForwardRenderer::placeholder_).
 class Texture {
 public:
     struct Params {
@@ -47,9 +51,6 @@ public:
 
     // Bind to a sampler uniform unit; defaults to unit 0 (see material binds).
     // Texture units are tracked explicitly in the renderer instead.
-
-    // Placeholder texture shared by everything that fails to load.
-    static const Texture &placeholder();
 
 private:
     void applyParams(const Params &params);
