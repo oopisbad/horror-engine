@@ -90,6 +90,8 @@ public:
     void simulateCursorMove(const glm::vec2 &position);
     // Cursor samples rejected as warps since start (diagnostic).
     int warpEvents() const { return warpEvents_; }
+    // Frames still inside the post-capture/focus re-baseline window.
+    int resyncFramesLeft() const { return resyncFrames_; }
 
     // Only true when ImGui wants the mouse (so clicks reach the overlay
     // instead of reaching gameplay handlers).
@@ -141,7 +143,13 @@ private:
     // one or two more position events in the same or the next poll, and only
     // one of them being swallowed is what produced a multi-hundred-pixel
     // delta ("camera snaps to a fixed orientation").
+    static constexpr int kResyncFrames = 8;
     int resyncSamples_ = 0;
+    // A warp can arrive several frames *after* the mode change (the window
+    // manager moves the pointer asynchronously), so the window is measured in
+    // frames as well as samples. Three samples alone expired before the warp
+    // and let a 205 px fake delta through -- the reproduced camera snap.
+    int resyncFrames_ = 0;
     int resyncEvents_ = 0;
     int warpEvents_ = 0;
 };

@@ -35,6 +35,19 @@ struct SkinSample {
     glm::vec3 aabbMin{0.0f};
     glm::vec3 aabbMax{0.0f};
     int jointsOutside = 0;
+
+    // Largest distance from any joint to the closest skinned vertex. This is
+    // the direct answer to "is the skeleton attached to the mesh?": every bone
+    // lives inside flesh, so a correct rig has a gap of a few centimetres and
+    // a mis-spaced one has a gap of tens of centimetres or metres. Only
+    // computed when requested (it is O(joints * vertices)).
+    float maxJointGap = 0.0f;
+    int worstJoint = -1;
+
+    // World AABB of the joints the skeleton overlay draws (same data, same
+    // transform). Project this and the skinned AABB to compare on screen.
+    glm::vec3 jointsMin{0.0f};
+    glm::vec3 jointsMax{0.0f};
 };
 
 // CPU-skins every vertex of one skinned entity with the *exact* joint matrices
@@ -44,7 +57,10 @@ struct SkinSample {
 //
 // Returns an empty vector when the entity is not a skinned mesh with an
 // Animator and clips. The animator's playback state is restored afterwards.
-std::vector<SkinSample> sampleSkin(Scene &scene, EntityId entity, int samples);
+// `measureJointGap` turns on the (more expensive) joint-to-nearest-vertex
+// distance, which is what proves the skeleton is inside the body.
+std::vector<SkinSample> sampleSkin(Scene &scene, EntityId entity, int samples,
+    bool measureJointGap = false);
 
 // The skin probe for one model level, formatted for the console.
 void printSkinReport(Scene &scene, const std::string &label, EntityId entity, int samples);

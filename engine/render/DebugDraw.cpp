@@ -45,10 +45,11 @@ void DebugDraw::ensureGpu()
 
 void DebugDraw::drawSegment(const glm::vec3 &a, const glm::vec3 &b, const glm::vec3 &color)
 {
-    vertices_.push_back(a.x); vertices_.push_back(a.y); vertices_.push_back(a.z);
-    vertices_.push_back(color.r); vertices_.push_back(color.g); vertices_.push_back(color.b);
-    vertices_.push_back(b.x); vertices_.push_back(b.y); vertices_.push_back(b.z);
-    vertices_.push_back(color.r); vertices_.push_back(color.g); vertices_.push_back(color.b);
+    std::vector<float> &out = overlay_ ? overlayVertices_ : vertices_;
+    out.push_back(a.x); out.push_back(a.y); out.push_back(a.z);
+    out.push_back(color.r); out.push_back(color.g); out.push_back(color.b);
+    out.push_back(b.x); out.push_back(b.y); out.push_back(b.z);
+    out.push_back(color.r); out.push_back(color.g); out.push_back(color.b);
 }
 
 void DebugDraw::addLine(const glm::vec3 &a, const glm::vec3 &b, const glm::vec3 &color)
@@ -132,13 +133,14 @@ void DebugDraw::addFrustum(const glm::mat4 &viewProjection, const glm::vec3 &col
         drawSegment(world[e[0]], world[e[1]], color);
 }
 
-void DebugDraw::flush(const glm::mat4 &viewProjection)
+void DebugDraw::drawBatch(std::vector<float> &vertices, const glm::mat4 &viewProjection,
+    bool depthTest)
 {
-    if (vertices_.empty())
+    if (vertices.empty())
         return;
     ensureGpu();
 
-    const size_t byteSize = vertices_.size() * sizeof(float);
+    const size_t byteSize = vertices.size() * sizeof(float);
     GLint currentSize = 0;
     glGetNamedBufferParameteriv(vbo_, GL_BUFFER_SIZE, &currentSize);
     if (byteSize > static_cast<size_t>(currentSize)) {
@@ -153,18 +155,30 @@ void DebugDraw::flush(const glm::mat4 &viewProjection)
     // Map + memcpy + unmap: cheapest path for a per-frame rewrite.
     void *ptr = glMapNamedBufferRange(vbo_, 0, static_cast<GLsizeiptr>(byteSize), GL_MAP_WRITE_BIT);
     HOR_CHECK(ptr != nullptr);
-    std::memcpy(ptr, vertices_.data(), byteSize);
+    std::memcpy(ptr, vertices.data(), byteSize);
     glUnmapNamedBuffer(vbo_);
+
+    if (depthTest)
+        glEnable(GL_DEPTH_TEST);
+    else
+        glDisable(GL_DEPTH_TEST); // x-ray pass
 
     shader_->bind();
     shader_->setUniform("uViewProj", viewProjection);
     glBindVertexArray(vao_);
     glLineWidth(1.5f);
-    glDrawArrays(GL_LINES, 0, static_cast<GLsizei>(vertices_.size() / 6));
+    glDrawArrays(GL_LINES, 0, static_cast<GLsizei>(vertices.size() / 6));
     glBindVertexArray(0);
     Shader::unbind();
 
-    vertices_.clear();
+    vertices.clear();
+}
+
+void DebugDraw::flush(const glm::mat4 &viewProjection)
+{
+    drawBatch(vertices_, viewProjection, true);   // depth-tested: gizmos, boxes
+    drawBatch(overlayVertices_, viewProjection, false); // x-ray: bones
+    glEnable(GL_DEPTH_TEST);
 }
 
 } // namespace horror

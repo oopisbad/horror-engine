@@ -70,6 +70,7 @@ std::string stepFlagList(uint32_t flags)
     add(kStepBobRestart, "BOB");
     add(kStepSubstepped, "SUB");
     add(kStepTeleport, "TELEPORT");
+    add(kStepLookRejected, "LOOK_REJECTED");
     return out.empty() ? "-" : out;
 }
 
@@ -194,6 +195,18 @@ uint32_t FlightRecorder::detectStepAnomaly(const StepTrace &cur)
     return kinds;
 }
 
+void FlightRecorder::noteSpuriousInput(const char *why)
+{
+    ++anomalies_;
+    HOR_LOG_WARN("[recorder] rejected look: {} (see debug_dump.txt)", why ? why : "spurious input");
+    if (sinceAutoDump_ < kAutoDumpCooldown)
+        return;
+    sinceAutoDump_ = 0.0f;
+    ++autoDumps_;
+    if (!dump("debug_dump.txt", std::format("rejected: {}", why ? why : "spurious input")))
+        --autoDumps_;
+}
+
 void FlightRecorder::onAnomaly(uint32_t kinds, const StepTrace &cur)
 {
     ++anomalies_;
@@ -234,7 +247,8 @@ bool FlightRecorder::dump(const std::string &path, const std::string &reason)
 
     std::fprintf(f, "\n# --- fixed steps (oldest first) ---\n");
     std::fprintf(f, "# seq t pos(x,y,z) vel(x,y,z) g flags yaw pitch look(dyaw,dpitch) "
-                  "rawMouse(dx,dy) cam(x,y,z) bob(y,roll) push(x,y,z) cap foc gui camWriter playerWriter\n");
+                  "rawMouse(dx,dy) cam(x,y,z) eye bob(y,roll) push(x,y,z) cap foc gui "
+                  "camWriter playerWriter\n");
     const size_t stepCount = std::min<size_t>(stepSeq_, kCapacity);
     const size_t stepFirst = (stepHead_ + kCapacity - stepCount) % kCapacity;
     float t = 0.0f;
@@ -244,12 +258,12 @@ bool FlightRecorder::dump(const std::string &path, const std::string &reason)
         std::fprintf(f,
             "  %6llu %8.3f (%.3f,%.3f,%.3f) (%.3f,%.3f,%.3f) %d %-18s "
             "yaw=%+.4f pitch=%+.4f look=(%+.4f,%+.4f) mouse=(%+.1f,%+.1f) "
-            "cam=(%.3f,%.3f,%.3f) bob=(%+.4f,%+.4f) push=(%+.3f,%+.3f,%+.3f) "
+            "cam=(%.3f,%.3f,%.3f) eye=%.3f bob=(%+.4f,%+.4f) push=(%+.3f,%+.3f,%+.3f) "
             "cap=%d foc=%d gui=%d %s %s\n",
             static_cast<unsigned long long>(s.seq), t, s.pos.x, s.pos.y, s.pos.z,
             s.vel.x, s.vel.y, s.vel.z, s.grounded ? 1 : 0,
             stepFlagList(s.flags).c_str(), s.camYaw, s.camPitch, s.look.x, s.look.y,
-            s.rawMouse.x, s.rawMouse.y, s.camPos.x, s.camPos.y, s.camPos.z,
+            s.rawMouse.x, s.rawMouse.y, s.camPos.x, s.camPos.y, s.camPos.z, s.eyeHeight,
             s.bobOffset.y, s.bobRoll, s.push.x, s.push.y, s.push.z,
             s.mouseCaptured ? 1 : 0, s.windowFocused ? 1 : 0, s.imguiMouse ? 1 : 0,
             s.cameraWriter, s.playerWriter);

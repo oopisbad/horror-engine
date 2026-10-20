@@ -52,7 +52,8 @@ int dominantJoint(const Vertex &v)
 
 } // namespace
 
-std::vector<SkinSample> sampleSkin(Scene &scene, EntityId entity, int samples)
+std::vector<SkinSample> sampleSkin(Scene &scene, EntityId entity, int samples,
+    bool measureJointGap)
 {
     std::vector<SkinSample> out;
     const SkinnedMeshRenderer *renderer = scene.find<SkinnedMeshRenderer>(entity);
@@ -116,11 +117,37 @@ std::vector<SkinSample> sampleSkin(Scene &scene, EntityId entity, int samples)
         // Joints must live inside the body they deform. 5 cm of slack covers
         // fingertips/nose tips poking past the vertex hull at odd poses.
         const glm::vec3 slack(0.05f);
-        for (const glm::vec3 &jp : anim->jointWorldPositions) {
-            const glm::vec3 p = glm::vec3(world * glm::vec4(jp, 1.0f));
+        glm::vec3 jointsMin(std::numeric_limits<float>::max());
+        glm::vec3 jointsMax(std::numeric_limits<float>::lowest());
+        for (size_t j = 0; j < anim->jointWorldPositions.size(); ++j) {
+            const glm::vec3 p = glm::vec3(world * glm::vec4(anim->jointWorldPositions[j], 1.0f));
+            jointsMin = glm::min(jointsMin, p);
+            jointsMax = glm::max(jointsMax, p);
             if (glm::any(glm::lessThan(p, aabbMin - slack))
                 || glm::any(glm::greaterThan(p, aabbMax + slack)))
                 ++sample.jointsOutside;
+        }
+        sample.jointsMin = jointsMin;
+        sample.jointsMax = jointsMax;
+
+        if (measureJointGap) {
+            // Brute force: joints are dozens, vertices a few thousand, and this
+            // only runs for --debug-skin and the selftest.
+            for (size_t j = 0; j < anim->jointWorldPositions.size(); ++j) {
+                const glm::vec3 p = glm::vec3(world
+                    * glm::vec4(anim->jointWorldPositions[j], 1.0f));
+                float best = std::numeric_limits<float>::max();
+                for (size_t v = 0; v < vertices.size(); ++v) {
+                    bool weighted = false;
+                    const glm::vec3 pos = glm::vec3(world
+                        * glm::vec4(skinVertex(vertices[v], anim->boneMatrices, weighted), 1.0f));
+                    best = std::min(best, glm::distance(pos, p));
+                }
+                if (best > sample.maxJointGap) {
+                    sample.maxJointGap = best;
+                    sample.worstJoint = static_cast<int>(j);
+                }
+            }
         }
 
         const auto resolve = [&](int vertexIndex, glm::vec3 &vertexWorld, glm::vec3 &jointWorld,
@@ -166,7 +193,7 @@ void printSkinReport(Scene &scene, const std::string &label, EntityId entity, in
         HOR_LOG_WARN("[skin] {}: no animator", label);
         return;
     }
-    const std::vector<SkinSample> report = sampleSkin(scene, entity, samples);
+    const std::vector<SkinSample> report = sampleSkin(scene, entity, samples, true);
     if (report.empty()) {
         HOR_LOG_WARN("[skin] {}: nothing to probe", label);
         return;
@@ -179,24 +206,40 @@ void printSkinReport(Scene &scene, const std::string &label, EntityId entity, in
     float minY = std::numeric_limits<float>::max();
     float maxY = std::numeric_limits<float>::lowest();
     int worstJointsOutside = 0;
+    float worstJointGap = 0.0f;
+    glm::vec3 worldMin(std::numeric_limits<float>::max());
+    glm::vec3 worldMax(std::numeric_limits<float>::lowest());
+    glm::vec3 jointsMin(std::numeric_limits<float>::max());
+    glm::vec3 jointsMax(std::numeric_limits<float>::lowest());
     for (const SkinSample &s : report) {
+        worldMin = glm::min(worldMin, s.aabbMin);
+        worldMax = glm::max(worldMax, s.aabbMax);
+        jointsMin = glm::min(jointsMin, s.jointsMin);
+        jointsMax = glm::max(jointsMax, s.jointsMax);
         worstJointsOutside = std::max(worstJointsOutside, s.jointsOutside);
+        worstJointGap = std::max(worstJointGap, s.maxJointGap);
         minOffset = std::min({ minOffset, s.footOffset, s.headOffset });
         maxOffset = std::max({ maxOffset, s.footOffset, s.headOffset });
         minY = std::min(minY, s.lowestY);
         maxY = std::max(maxY, s.highestY);
         HOR_LOG_INFO(
             "[skin]   t={:.3f} footJoint={} footOff={:.4f} headJoint={} headOff={:.4f} "
-            "lowY={:.4f} highY={:.4f} jointsOutside={} footV=({:.3f},{:.3f},{:.3f}) "
-            "footJ=({:.3f},{:.3f},{:.3f})",
+            "lowY={:.4f} highY={:.4f} jointsOutside={} maxJointGap={:.4f} (joint {}) "
+            "footV=({:.3f},{:.3f},{:.3f}) footJ=({:.3f},{:.3f},{:.3f})",
             s.time, s.footJointIndex, s.footOffset, s.headJointIndex, s.headOffset, s.lowestY,
-            s.highestY, s.jointsOutside, s.footVertex.x, s.footVertex.y, s.footVertex.z,
-            s.footJoint.x, s.footJoint.y, s.footJoint.z);
+            s.highestY, s.jointsOutside, s.maxJointGap, s.worstJoint, s.footVertex.x,
+            s.footVertex.y, s.footVertex.z, s.footJoint.x, s.footJoint.y, s.footJoint.z);
     }
     HOR_LOG_INFO(
         "[skin] {} offsets [{:.4f}..{:.4f}] m, lowest vertex [{:.4f}..{:.4f}] m, joints outside "
-        "the body: {}",
-        label, minOffset, maxOffset, minY, maxY, worstJointsOutside);
+        "the body: {}, worst joint-to-mesh gap {:.4f} m",
+        label, minOffset, maxOffset, minY, maxY, worstJointsOutside, worstJointGap);
+    // World AABB of the skinned mesh: project it (or the joints) yourself to
+    // see where the body is on screen. The skeleton overlay must sit inside.
+    HOR_LOG_INFO("[skin] {} skinned world AABB min=({:.3f},{:.3f},{:.3f}) max=({:.3f},{:.3f},{:.3f})",
+        label, worldMin.x, worldMin.y, worldMin.z, worldMax.x, worldMax.y, worldMax.z);
+    HOR_LOG_INFO("[skin] {} joint world AABB  min=({:.3f},{:.3f},{:.3f}) max=({:.3f},{:.3f},{:.3f})",
+        label, jointsMin.x, jointsMin.y, jointsMin.z, jointsMax.x, jointsMax.y, jointsMax.z);
 }
 
 } // namespace horror

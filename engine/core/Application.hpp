@@ -26,6 +26,7 @@ public:
         uint32_t windowHeight = 720;
         bool fullscreen = false;
         bool vsync = true;
+        bool wireframe = false; // start with polygon mode LINE (--wireframe)
         float fixedStepSeconds = 1.0f / 60.0f;
         uint32_t shadowMapSize = 1024;
     };

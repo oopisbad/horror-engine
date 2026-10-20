@@ -515,8 +515,14 @@ void ForwardRenderer::drawDebugData(Scene &scene, Camera &camera)
     });
 
     // Skeleton overlay (cyan bones, yellow joints). Joints come from the
-    // Animator's last evaluated pose, in model space, so the entity's world
+    // Animator's last evaluated pose, in mesh-node space, so the entity's world
     // matrix places them exactly where the skinned vertices ended up.
+    //
+    // Drawn in x-ray (overlay) mode on purpose: a depth-tested skeleton is
+    // mostly hidden inside the mesh, so the visible fragments look detached.
+    // Visible-through-the-body, the whole rig can be compared to the skin at a
+    // glance -- which is the question this overlay exists to answer.
+    debugDraw_->setOverlayMode(drawBones_);
     if (drawBones_) {
         scene.view<Animator>([&](EntityId id, const Animator &anim) {
             if (!anim.skeleton || anim.jointWorldPositions.empty())
@@ -537,6 +543,7 @@ void ForwardRenderer::drawDebugData(Scene &scene, Camera &camera)
             }
         });
     }
+    debugDraw_->setOverlayMode(false);
 
     debugDraw_->flush(camera.viewProjection());
 }

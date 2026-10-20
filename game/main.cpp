@@ -30,6 +30,11 @@ using namespace horror;
 // Top face of the corridor floor slab (local half-thickness 0.05, rotated flat).
 constexpr float kFloorTopY = 0.05f;
 
+// Distance along the view ray the flashlight beam is aimed at. Far enough that
+// the hand offset costs no visible cone shift at room scale, close enough to
+// stay well inside the geometric error of a parallax-free aim.
+constexpr float kFlashlightAimDistance = 12.0f;
+
 // ---- test-scene construction -------------------------------------------------
 // Procedural placeholders only (no assets yet): a dark test corridor, some
 // boxes to prove collision, two point lights, camera + flashlight. Every
@@ -111,21 +116,28 @@ void buildTestScene(Application &app)
     wall("pillar", { -0.95f, 1.0f, -4.6f }, { 0.25f, 1.0f, 0.25f }, { 0.36f, 0.34f, 0.37f });
 
     // The red sphere -- "the red circle on the floor" from the bug reports.
-    // It is a render-only prop: 0.3 m radius at y=0.3 (resting on the slab) with
-    // NO collider, so walking through it did nothing at all. It now carries a
-    // TriggerVolume so stepping onto it fires an event (logged + shown in the
-    // F1 overlay), which makes the report testable without guessing.
+    // 0.3 m radius at y=0.3 (resting on the slab). It used to be render-only,
+    // so you walked straight through it; it is now solid (AABB, 0.6 m cube:
+    // taller than the 0.35 m step offset, so you have to jump onto it) and it
+    // carries a TriggerVolume that fires on entry.
     {
         EntityId e = scene.create("red-ball");
         scene.add(e, MeshRenderer{ ball, mat({ 0.7f, 0.1f, 0.1f }, 0.4f), true, true });
         scene.transform(e).position = { -0.8f, 0.3f, -1.5f };
+        const glm::vec3 c = scene.transform(e).position;
+        const glm::vec3 half = ball->maxBounds(); // 0.3; entity scale is 1
+        // Collider half-extents are local, and the transform scale is 1, so
+        // the mesh bounds are already the local half extents.
+        scene.add(e, AABBCollider{ glm::vec3(0.0f), half, {}, {}, true });
+
         TriggerVolume trigger;
         trigger.tag = "red-ball";
-        // AABB from the sphere's own bounds, so the volume always matches the
-        // mesh if the radius or position changes.
-        const glm::vec3 c = scene.transform(e).position;
-        trigger.worldMin = c + ball->minBounds();
-        trigger.worldMax = c + ball->maxBounds();
+        // Bigger than the ball so *touching* it counts (the player stops with
+        // their body box against the face, where a strict AABB test would not
+        // overlap), and taller so standing on top still counts.
+        const glm::vec3 reach = half + glm::vec3(0.30f, 0.0f, 0.30f);
+        trigger.worldMin = c - reach;
+        trigger.worldMax = c + reach + glm::vec3(0.0f, 0.60f, 0.0f);
         scene.add(e, std::move(trigger));
     }
 
@@ -284,6 +296,23 @@ void spawnGltfLevel(Application &app, const char *path, const glm::vec3 &positio
 
     // Placement is bounds-driven: the authored spawn height is only a hint.
     snapLevelToFloor(app.scene(), instance, floorY);
+}
+
+// Puts the flashlight on the camera: origin at a hand offset, beam aimed at the
+// crosshair (see the comment at the call site). Shared by the fixed step and
+// the self-test so the test exercises the real aim math.
+void syncFlashlight(Application &app, EntityId flashlight)
+{
+    Camera &cam = app.camera();
+    const glm::vec3 lightOrigin = cam.position + cam.right() * 0.12f - cam.up() * 0.10f;
+    Transform &light = app.scene().transform(flashlight);
+    light.position = lightOrigin;
+    // Aim the *beam* at the crosshair instead of parallel to the eye axis: the
+    // hand offset would otherwise push the bright spot sideways by
+    // atan(0.12 / distance) -- invisible down a corridor, ~20 degrees off on a
+    // wall 30 cm away ("the flashlight gets off-centred near walls").
+    const glm::vec3 aimPoint = cam.position + cam.forward() * kFlashlightAimDistance;
+    light.rotation = glm::quatLookAt(glm::normalize(aimPoint - lightOrigin), cam.up());
 }
 
 // ---- gameplay systems --------------------------------------------------------
@@ -527,7 +556,7 @@ void runScript(Application &app, EntityId player, float dt, const std::string &s
 
 // Scripted movement matrix + model placement checks. Returns the number of
 // failed checks.
-int runSelfTest(Application &app, EntityId player, float dt,
+int runSelfTest(Application &app, EntityId player, float dt, EntityId flashlight,
     const LevelInstance &cesiumMan, const LevelInstance &fox)
 {
     Scene &scene = app.scene();
@@ -853,9 +882,103 @@ int runSelfTest(Application &app, EntityId player, float dt,
             detail << "end=(" << end.x << "," << end.y << "," << end.z << ")"
                    << " enters=" << tv->enterCount << " inside=" << (tv->playerInside ? 1 : 0)
                    << " volume x[" << tv->worldMin.x << "," << tv->worldMax.x << "]";
-            report("red-ball trigger", tv->enterCount == 1 && tv->playerInside, detail.str());
+            // The ball is solid now: walking into it must stop at its face
+            // (near face z=-1.2, body radius 0.28 -> stop at ~-0.92), not pass
+            // through to the far side.
+            report("red-ball trigger",
+                tv->enterCount == 1 && tv->playerInside && end.z > -1.05f, detail.str());
             h.held.clear();
         }
+    }
+
+    // Look spike: a warp-sized mouse delta inside one fixed step must not move
+    // the camera. This is the reproduced "camera snaps to a fixed orientation"
+    // -- an F1 capture change delivered a 205 px cursor warp as one delta,
+    // which turned the view by 0.451 rad (~26 deg) in both axes. The
+    // controller rejects any step that would turn more than 0.35 rad, and the
+    // recorder counts the rejection.
+    {
+        resetCharacter(app, player, padSpawn);
+        h.held.clear();
+        const int rejectsBefore = FlightRecorder::get().anomalyCount();
+        const float yaw0 = cam.yaw;
+        const float pitch0 = cam.pitch;
+        h.step({ 900.0f, 900.0f }); // ~2 rad at the default sensitivity
+        const float dy = std::abs(cam.yaw - yaw0);
+        const float dp = std::abs(cam.pitch - pitch0);
+        const int rejects = FlightRecorder::get().anomalyCount() - rejectsBefore;
+        // ...and ordinary movement still works immediately afterwards.
+        h.step({ 10.0f, 0.0f });
+        const float dy2 = std::abs(cam.yaw - yaw0);
+        std::ostringstream detail;
+        detail << "spikeYaw=" << dy << " spikePitch=" << dp << " rejected=" << rejects
+               << " normalTurn=" << dy2;
+        report("look spike", dy < 1e-4f && dp < 1e-4f && rejects >= 1 && dy2 > 0.01f,
+            detail.str());
+    }
+
+    // Flashlight aim: the beam must point where the player looks (within a
+    // degree or two) while the origin keeps the hand offset. Parallel-aiming
+    // from an offset origin made the bright spot slide ~20 degrees sideways on
+    // a wall 30 cm away.
+    {
+        float worstAngle = 0.0f;
+        float originOffset = 0.0f;
+        for (float yawDeg : { 0.0f, 45.0f, -120.0f }) {
+            resetCharacter(app, player, padSpawn);
+            cam.yaw = glm::radians(yawDeg);
+            cam.pitch = -0.2f;
+            h.held.clear();
+            for (int i = 0; i < 2; ++i) {
+                h.step();
+                syncFlashlight(app, flashlight);
+                scene.updateWorldMatrices();
+            }
+            const glm::mat4 &lightWorld = scene.worldMatrix(flashlight);
+            const glm::vec3 beam = -glm::normalize(glm::vec3(lightWorld[2]));
+            worstAngle = std::max(worstAngle,
+                std::acos(glm::clamp(glm::dot(beam, cam.forward()), -1.0f, 1.0f)));
+            originOffset = glm::length(glm::vec3(lightWorld[3]) - cam.position);
+        }
+        std::ostringstream detail;
+        detail << "beam-vs-view=" << glm::degrees(worstAngle) << " deg handOffset="
+               << originOffset << " m";
+        report("flashlight aim", worstAngle < glm::radians(2.0f)
+                && std::abs(originOffset - 0.156f) < 0.02f,
+            detail.str());
+    }
+
+    // Crouch: the eye has to come down with the body. It used to be a fixed
+    // 1.62 m, so crouching only shrank the collider and slowed the walk while
+    // the camera never moved ("crouch doesn't work").
+    {
+        resetCharacter(app, player, padSpawn);
+        h.held.clear();
+        for (int i = 0; i < 5; ++i)
+            h.step();
+        const float eyeStanding = cam.position.y - scene.transform(player).position.y;
+        h.held = { GLFW_KEY_LEFT_CONTROL };
+        float maxStep = 0.0f;
+        float prevY = cam.position.y;
+        for (int i = 0; i < 60; ++i) {
+            h.step();
+            maxStep = std::max(maxStep, std::abs(cam.position.y - prevY));
+            prevY = cam.position.y;
+        }
+        const float eyeCrouched = cam.position.y - scene.transform(player).position.y;
+        h.held.clear();
+        for (int i = 0; i < 90; ++i)
+            h.step(); // stand back up
+        const float eyeBack = cam.position.y - scene.transform(player).position.y;
+        const CharacterController *cc = scene.find<CharacterController>(player);
+        std::ostringstream detail;
+        detail << "eye standing=" << eyeStanding << " crouched=" << eyeCrouched
+               << " back=" << eyeBack << " maxStep=" << maxStep * 1000.0f << " mm cursor="
+               << (cc ? cc->crouching : false);
+        report("crouch eye",
+            eyeCrouched < eyeStanding - 0.5f && std::abs(eyeBack - eyeStanding) < 0.01f
+                && maxStep < 0.15f,
+            detail.str());
     }
 
     // Mouse warp guard: a cursor sample can never reach the camera right after
@@ -866,10 +989,18 @@ int runSelfTest(Application &app, EntityId player, float dt,
         Input &in = app.input();
         const int warpsBefore = in.warpEvents();
         in.setMouseCaptured(false);
-        in.setMouseCaptured(true); // re-baseline: next 3 samples are swallowed
-        in.simulateCursorMove({ 960.0f, 540.0f }); // the capture warp itself
+        in.setMouseCaptured(true); // re-baseline: 3 samples + 8 frames swallowed
+        // The capture warp and the position event that follows it (the pair
+        // that used to slip a 205 px delta through).
+        in.simulateCursorMove({ 960.0f, 540.0f });
         in.simulateCursorMove({ 962.0f, 541.0f });
-        in.simulateCursorMove({ 963.0f, 541.0f });
+        in.simulateCursorMove({ 963.0f, 541.0f }); // fills the 3-sample window
+        // Let the frame window expire. update() re-arms it whenever the window
+        // focus changes, which can happen underneath a test run, so stop when
+        // it is actually clear rather than after a fixed count.
+        for (int i = 0; i < 200 && in.resyncFramesLeft() > 0; ++i)
+            in.update();
+        const int framesLeft = in.resyncFramesLeft();
         const glm::vec2 afterResync = in.consumeMouseDelta();
         in.simulateCursorMove({ 973.0f, 546.0f }); // +10/+5 px: real motion
         const glm::vec2 real = in.consumeMouseDelta();
@@ -881,7 +1012,7 @@ int runSelfTest(Application &app, EntityId player, float dt,
         std::ostringstream detail;
         detail << "resyncDelta=" << glm::length(afterResync) << " realDelta=(" << real.x
                << "," << real.y << ") warpDelta=" << glm::length(warp)
-               << " warpsRejected=" << in.warpEvents();
+               << " warpsRejected=" << in.warpEvents() << " resyncFramesLeft=" << framesLeft;
         report("mouse warp guard", pass, detail.str());
     }
 
@@ -1020,6 +1151,8 @@ int main(int argc, char **argv)
             debugBones = true;
         else if (a == "--patrol")
             startPatrol = true;
+        else if (a == "--wireframe")
+            cfg.wireframe = true;
     }
 
     Application app{ cfg };
@@ -1095,6 +1228,8 @@ int main(int argc, char **argv)
     // too so a single run shows mesh + bones at the same animation time.
     if (debugBones)
         app.renderer().setDrawBones(true);
+    if (cfg.wireframe)
+        app.renderer().setWireframe(true);
 
     CharacterSystem::Hooks hooks{ &app.camera(), &app.input(), debugInput };
 
@@ -1103,7 +1238,8 @@ int main(int argc, char **argv)
     app.scene().updateWorldMatrices();
     app.scene().refreshColliderBounds();
     if (selftest) {
-        const int failures = runSelfTest(app, player, cfg.fixedStepSeconds, cesiumMan, fox);
+        const int failures = runSelfTest(app, player, cfg.fixedStepSeconds, flashlight,
+            cesiumMan, fox);
         return failures == 0 ? 0 : 1;
     }
     if (!script.empty())
@@ -1118,15 +1254,10 @@ int main(int argc, char **argv)
         // orientation basis. (The renderer aims it at the camera basis too;
         // keeping the transform in sync means the light can be re-parented
         // to, say, a held prop later without renderer changes.)
-        // Hand-held offset: slightly right of and below the eye. The renderer
-        // reads this entity's world matrix as the light origin/axis.
-        app.scene().transform(flashlight).position = app.camera().position
-            + app.camera().right() * 0.12f - app.camera().up() * 0.10f;
-        // Quat from yaw around +Y then pitch around +X, so its local -Z matches
-        // Camera::forward() exactly.
-        app.scene().transform(flashlight).rotation =
-            glm::angleAxis(app.camera().yaw, glm::vec3(0, 1, 0))
-            * glm::angleAxis(app.camera().pitch, glm::vec3(1, 0, 0));
+        // Flashlight rides the camera: hand offset for the origin, beam aimed
+        // at the crosshair. The renderer reads this entity's world matrix as
+        // the light origin/axis.
+        syncFlashlight(app, flashlight);
     };
 
     // Variable-rate hook: nothing here yet (camera smoothing lives in the

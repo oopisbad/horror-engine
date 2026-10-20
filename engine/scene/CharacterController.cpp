@@ -56,8 +56,23 @@ void CharacterSystem::step(Scene &scene, EntityId entity, const Hooks &hooks, fl
     // applied exactly once per fixed step no matter whether a frame ran zero,
     // one or several steps (reading a per-frame delta in the fixed step made
     // look speed depend on the frame rate and double-applied it on catch-up).
-    const glm::vec2 rawMouse = hooks.input->consumeMouseDelta();
-    const glm::vec2 md = rawMouse * cc->mouseLookSensitivity;
+    glm::vec2 rawMouse = hooks.input->consumeMouseDelta();
+    glm::vec2 md = rawMouse * cc->mouseLookSensitivity;
+
+    // Last line of defence: no single fixed step may turn the camera further
+    // than a plausible hand movement. This is what a cursor warp (a pointer
+    // jump the size of half the window, delivered as one "mouse" delta) does
+    // if it slips past the Input guards -- measured 0.451 rad of yaw and
+    // 0.453 rad of pitch on an F1 capture change. 0.35 rad per 1/60 s step is
+    // ten times the fastest human flick, so real input never reaches it.
+    constexpr float kMaxLookPerStep = 0.35f;
+    bool lookRejected = false;
+    if (glm::length(md) > kMaxLookPerStep) {
+        lookRejected = true;
+        md = glm::vec2(0.0f);
+        rawMouse = glm::vec2(0.0f);
+        FlightRecorder::get().noteSpuriousInput("look spike in one fixed step");
+    }
     // Screen convention (GLFW: +y is down the screen):
     //   mouse right -> turn right, mouse up -> look up.
     // Camera::forward() is (-sin yaw, *, -cos yaw), so *increasing* yaw turns
@@ -335,11 +350,20 @@ void CharacterSystem::step(Scene &scene, EntityId entity, const Hooks &hooks, fl
     const bool bobRestarted = bobDriving && !cc->bobDriving;
     cc->bobDriving = bobDriving;
 
+    // Eye height follows the *smoothed* body height instead of being the fixed
+    // 1.62 m it used to be. That constant was why crouching did nothing
+    // visible: the collider shrank and the walk speed dropped, but the eye
+    // never moved. Scaling by currentHeight/height keeps the same eye-to-body
+    // ratio standing and crouched (1.62 m -> 0.97 m) and inherits the existing
+    // smoothing, so there is no snap when standing up.
+    const float eyeHeight = cc->eyeHeight
+        * (cc->currentHeight / (cc->height > 1e-3f ? cc->height : 1.0f));
+
     // Camera eye = feet + eye height + bob (bob in local axis space here;
     // camera folds in roll itself -- see Camera::update).
     noteCameraWriter("CharacterSystem");
     notePlayerWriter("CharacterSystem");
-    hooks.camera->position = xf.position + glm::vec3(0.0f, cc->eyeHeight, 0.0f) + cc->bobOffset;
+    hooks.camera->position = xf.position + glm::vec3(0.0f, eyeHeight, 0.0f) + cc->bobOffset;
     hooks.camera->bobOffset = cc->bobOffset;
     hooks.camera->bobRoll = cc->bobRoll;
 
@@ -348,6 +372,8 @@ void CharacterSystem::step(Scene &scene, EntityId entity, const Hooks &hooks, fl
     // data source for the "camera snapped" reports (see FlightRecorder).
     {
         uint32_t flags = kStepNone;
+        if (lookRejected)
+            flags |= kStepLookRejected;
         if (landedThisStep)
             flags |= kStepLanded;
         if (jumped)
@@ -370,6 +396,7 @@ void CharacterSystem::step(Scene &scene, EntityId entity, const Hooks &hooks, fl
         trace.push = pushTotal;
         trace.camPos = hooks.camera->position;
         trace.bobOffset = cc->bobOffset;
+        trace.eyeHeight = eyeHeight;
         trace.camYaw = hooks.camera->yaw;
         trace.camPitch = hooks.camera->pitch;
         trace.bobRoll = cc->bobRoll;

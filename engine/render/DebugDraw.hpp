@@ -32,6 +32,14 @@ public:
     void addAxes(const glm::vec3 &origin, float length);
     void addFrustum(const glm::mat4 &viewProjection, const glm::vec3 &color);
 
+    // Overlay (x-ray) mode: primitives added while this is on are drawn after
+    // the depth-tested batch with depth testing disabled, so they are visible
+    // *through* geometry. The skeleton uses this -- a depth-tested skeleton is
+    // 90% hidden inside the body it deforms, which reads as "the bones are not
+    // attached" when in fact they are.
+    void setOverlayMode(bool on) { overlay_ = on; }
+    bool overlayMode() const { return overlay_; }
+
     // Draws everything accumulated this frame, then clears the batch.
     void flush(const glm::mat4 &viewProjection);
 
@@ -40,9 +48,13 @@ public:
 private:
     void ensureGpu();
     void drawSegment(const glm::vec3 &a, const glm::vec3 &b, const glm::vec3 &color);
+    void drawBatch(std::vector<float> &vertices, const glm::mat4 &viewProjection,
+        bool depthTest);
 
     // Interleaved line vertices: pos(3) + color(3).
     std::vector<float> vertices_;
+    std::vector<float> overlayVertices_;
+    bool overlay_ = false;
     GLuint vao_ = 0;
     GLuint vbo_ = 0;
     std::unique_ptr<class Shader> shader_; // dtor in cpp where Shader is complete

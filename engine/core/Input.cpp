@@ -10,6 +10,12 @@ namespace {
 constexpr int kUnknown = GLFW_KEY_UNKNOWN;
 } // namespace
 
+// Frames to keep discarding cursor samples after a capture/focus change (~130
+// ms at 60 fps). Long enough to cover the asynchronous WM warp that produced
+// the 205 px fake delta in the recorded camera snap, short enough to be
+// unnoticeable when you press F1.
+constexpr int Input::kResyncFrames;
+
 Input::Input()
 {
     for (auto &k : keys_)
@@ -105,6 +111,10 @@ void Input::resyncMouse(const char *why)
     mouseDelta_ = glm::vec2(0.0f);
     firstMouseSample_ = true;
     resyncSamples_ = 2;
+    // Also hold the window open for a few frames: the window manager moves the
+    // pointer *after* the mode change, sometimes several frames later. Swallow
+    // samples until both limits expire.
+    resyncFrames_ = kResyncFrames;
     ++resyncEvents_;
     if (glm::length(pending) > 20.0f)
         HOR_LOG_DEBUG("mouse re-baseline ({}): dropped pending delta ({:+.1f},{:+.1f})",
@@ -127,15 +137,14 @@ void Input::handleCursorPos(const glm::vec2 &pos)
     const glm::vec2 delta = pos - mousePos_;
     mousePos_ = pos;
 
-    if (firstMouseSample_ || resyncSamples_ > 0) {
+    if (firstMouseSample_ || resyncSamples_ > 0 || resyncFrames_ > 0) {
         // The first samples after a capture/focus change are not movement: the
         // cursor may have been warped from anywhere to the window/capture
         // position. Swallow a couple of samples so the warp and the position
         // event that follows it both fall inside the window -- swallowing only
         // the first one let the second through as a huge delta, which is what
-        // snapped the camera to a fixed orientation (pitch clamped at +/-89).
-        if (resyncSamples_ > 0)
-            --resyncSamples_;
+        // snapped the camera to a fixed orientation (pitch clamped at +/-89).    if (resyncSamples_ > 0)
+        --resyncSamples_;
         firstMouseSample_ = false;
         return;
     }
@@ -182,6 +191,8 @@ void Input::update()
     for (auto &b : buttons_)
         b.wasDown = b.isDown;
     scrollDelta_ = glm::vec2(0.0f);
+    if (resyncFrames_ > 0)
+        --resyncFrames_;
 
     // Focus backstop: the callback covers every real transition, but sampling
     // here also catches a window that started unfocused (or a platform that

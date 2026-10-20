@@ -45,6 +45,7 @@ enum StepFlags : uint32_t {
     kStepBobRestart = 1u << 5, // head bob went from damped to driven
     kStepSubstepped = 1u << 6, // more than one collision pass
     kStepTeleport = 1u << 7,   // explicit reset/respawn before this step
+    kStepLookRejected = 1u << 8, // mouse look rejected as a warp/spike
 };
 
 struct StepTrace {
@@ -55,6 +56,7 @@ struct StepTrace {
     glm::vec3 push{0.0f};
     glm::vec3 camPos{0.0f};
     glm::vec3 bobOffset{0.0f};
+    float eyeHeight = 0.0f; // feet -> eye (crouch lowers it; smoothing jumps show here)
     float camYaw = 0.0f;
     float camPitch = 0.0f;
     float bobRoll = 0.0f;
@@ -114,6 +116,11 @@ public:
     // resetCharacter). The next step is marked kStepTeleport and exempt from
     // anomaly detection -- an expected jump must not look like the bug.
     void noteTeleport(const char *why) { pendingTeleport_ = why ? why : "teleport"; }
+
+    // Something was about to move the camera that cannot be player intent (a
+    // look spike in one step, a warp that slipped through). Logs one warning
+    // and dumps, rate limited like the anomaly path.
+    void noteSpuriousInput(const char *why);
 
     // Writes the whole ring buffer (oldest first) plus a header to `path`.
     // Returns false when the file could not be opened.
