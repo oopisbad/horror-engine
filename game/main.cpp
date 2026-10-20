@@ -813,9 +813,10 @@ int runSelfTest(Application &app, EntityId player, float dt, EntityId flashlight
     // just the normal walk bob at 2.4 m/s). Threshold 10 mm separates them.
     {
         // Run it at the red ball, i.e. the spot from the bug report ("jump
-        // while standing on the circle and land"). The ball has no collider,
-        // so the floor there is the corridor slab like anywhere else: the
-        // flinch was the head bob restarting, not the prop.
+        // while standing on the circle and land"). The ball is solid now, so
+        // this spawn point sits inside its collider and walks out through it
+        // (only entering a face is blocked); the flinch measured here is the
+        // head bob restarting, not the prop.
         resetCharacter(app, player, { -0.8f, kFloorTopY, -1.3f });
         h.held = { GLFW_KEY_W };
         for (int i = 0; i < 30; ++i) // settle into a walk; bob is driven
@@ -1014,6 +1015,49 @@ int runSelfTest(Application &app, EntityId player, float dt, EntityId flashlight
                << "," << real.y << ") warpDelta=" << glm::length(warp)
                << " warpsRejected=" << in.warpEvents() << " resyncFramesLeft=" << framesLeft;
         report("mouse warp guard", pass, detail.str());
+    }
+
+    // Re-baseline counter: extra cursor samples must not drive the sample
+    // window negative. resyncSamples_ is decremented only while > 0, so a
+    // burst of samples and a run past the 8-frame window leave it at exactly
+    // 0; look input must still work afterwards. This is the regression guard
+    // for the counter underflowing (which would keep swallowing look forever
+    // if only the frame window were consulted).
+    {
+        Input &in = app.input();
+        in.setMouseCaptured(false);
+        in.setMouseCaptured(true); // re-baseline: sample + frame windows re-arm
+        const glm::vec2 start{ 400.0f, 300.0f };
+        in.simulateCursorMove(start);
+        for (int i = 1; i <= 40; ++i) // far more samples than the 3-sample window
+            in.simulateCursorMove(start + glm::vec2(static_cast<float>(i), 0.0f));
+        const int samplesAfterBurst = in.resyncSamplesLeft();
+        // One sample per frame, well past the frame window, so an unguarded
+        // decrement would keep running on every extra event.
+        for (int i = 0; i < 24; ++i) {
+            in.simulateCursorMove(start + glm::vec2(60.0f + static_cast<float>(i), 0.0f));
+            in.update();
+        }
+        // update() re-arms the window if the real window focus changes under
+        // the test run; drain it the same way the warp-guard check does.
+        for (int i = 0; i < 200 && in.resyncFramesLeft() > 0; ++i) {
+            in.simulateCursorMove(start + glm::vec2(100.0f + static_cast<float>(i), 0.0f));
+            in.update();
+        }
+        const int samplesLeft = in.resyncSamplesLeft();
+        const int framesLeft = in.resyncFramesLeft();
+        in.consumeMouseDelta();
+        in.simulateCursorMove(in.mousePos() + glm::vec2(10.0f, 6.0f));
+        const glm::vec2 resumed = in.consumeMouseDelta();
+        std::ostringstream detail;
+        detail << "afterBurst=" << samplesAfterBurst << " samplesLeft=" << samplesLeft
+               << " framesLeft=" << framesLeft << " resumed=(" << resumed.x << ","
+               << resumed.y << ")";
+        report("resync counter",
+            samplesAfterBurst == 0 && samplesLeft == 0 && framesLeft == 0
+                && std::abs(resumed.x - 10.0f) < 1e-3f
+                && std::abs(resumed.y - 6.0f) < 1e-3f,
+            detail.str());
     }
 
     // Test models: the lowest vertex must sit on the floor slab's top face --

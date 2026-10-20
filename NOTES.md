@@ -45,13 +45,14 @@ Input debugging (added in the movement/mouse pass):
   synthetic input before the render loop. Commands: `hold <KEY[+KEY]> <steps>`,
   `release <KEY>`, `wait <steps>`, `mouse <dx> <dy>`. Keys: W A S D SPACE SHIFT
   CTRL. `hold` presses for exactly N steps, then releases.
-- `--selftest` runs a 26-check scripted assertion matrix (walk W/A/S/D,
+- `--selftest` runs a 27-check scripted assertion matrix (walk W/A/S/D,
   diagonal, sprint, crouch, idle, jump, corridor wall stop, 0.2 m step-offset,
   6 cm thin-wall, mouse right/up/invert, key edges, landing bob continuity,
-  red-ball trigger, mouse warp guard, single-step look-spike rejection,
-  flashlight beam aim, crouch eye height) on a private platform away from the
-  corridor and exits non-zero on failure. It needs a GL window (Application
-  owns the scene/camera), so it is scripted rather than fully headless. The
+  red-ball trigger, mouse warp guard, resync counter, single-step look-spike
+  rejection, flashlight beam aim, crouch eye height) on a private platform
+  away from the corridor and exits non-zero on failure. It needs a GL window
+  (Application owns the scene/camera), so it is scripted rather than fully
+  headless. The
   last four checks are the sample models: the lowest vertex (rest pose and
   every sampled pose of the playing clip, 24 samples) must sit on `kFloorTopY`
   (0.05 m) within 1 mm, the foot/head vertex must stay within 0.30/0.60 m of
@@ -188,9 +189,13 @@ focus change: the cursor is warped by the window manager when the mode
 changes, and the follow-up position event was hundreds of pixels of fake look
 delta (the camera snap). The re-baseline clears the pending delta, swallows
 three cursor events and then every sample for 8 more frames, because the WM
-can move the pointer several frames later. `Input::cursorPosCallback` also
-drops any single event larger than 500 px as a warp (warning the first 8
-times, then only counting it in `Input::warpEvents`).
+can move the pointer several frames later. The sample counter is guarded
+(`if (resyncSamples_ > 0)` before the decrement), so extra cursor events leave
+it at 0 instead of underflowing; the `resync counter` selftest feeds 40
+samples plus 24 frames and then checks normal look still works.
+`Input::cursorPosCallback` also drops any single event larger than 500 px as a
+warp (warning the first 8 times, then only counting it in
+`Input::warpEvents`).
 
 Mouse convention: mouse right turns right, mouse up looks up, no acceleration
 (GLFW raw mouse motion is enabled when the platform supports it). Look

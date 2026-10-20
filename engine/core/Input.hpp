@@ -92,6 +92,9 @@ public:
     int warpEvents() const { return warpEvents_; }
     // Frames still inside the post-capture/focus re-baseline window.
     int resyncFramesLeft() const { return resyncFrames_; }
+    // Cursor samples still swallowed by the current re-baseline. Settles at
+    // 0 and never goes negative (the decrement is guarded).
+    int resyncSamplesLeft() const { return resyncSamples_; }
 
     // Only true when ImGui wants the mouse (so clicks reach the overlay
     // instead of reaching gameplay handlers).

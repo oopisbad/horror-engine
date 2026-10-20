@@ -143,8 +143,9 @@ void Input::handleCursorPos(const glm::vec2 &pos)
         // position. Swallow a couple of samples so the warp and the position
         // event that follows it both fall inside the window -- swallowing only
         // the first one let the second through as a huge delta, which is what
-        // snapped the camera to a fixed orientation (pitch clamped at +/-89).    if (resyncSamples_ > 0)
-        --resyncSamples_;
+        // snapped the camera to a fixed orientation (pitch clamped at +/-89).
+        if (resyncSamples_ > 0)
+            --resyncSamples_;
         firstMouseSample_ = false;
         return;
     }
