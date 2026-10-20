@@ -269,7 +269,6 @@ void AnimationSystem::update(Scene &scene, float deltaSeconds)
         if (!anim.skeleton || !anim.clips || anim.currentClip < 0 || anim.paused)
             return;
 
-        const Skeleton &sk = *anim.skeleton;
         const AnimationClip *current = anim.clip(anim.currentClip);
         if (!current)
             return;

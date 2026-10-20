@@ -89,8 +89,9 @@ Always on, cheap, silent. Two ring buffers of the last ~420 records (~7 s):
 one: yaw or pitch moving more than ~6 degrees beyond the applied mouse look, a
 camera position moving more than `velocity*dt + 6 cm + 0.30 m`, or the body
 moving further than its velocity explains. On a hit it logs one `[recorder]`
-WARNING with the offending numbers and writes `./debug_dump.txt` (rate limited
-to one every 0.5 s). Deliberate resets call `noteTeleport()`, so a spawn/respawn
+WARNING with the offending numbers and writes `./debug_dump.txt` (the first
+anomaly always dumps; repeats are rate limited to one every 0.5 s so a
+per-step snap does not write a file per step). Deliberate resets call `noteTeleport()`, so a spawn/respawn
 never looks like a bug -- those rows are flagged `TELEPORT` instead.
 
 **F9 dumps on demand** to `./debug_dump.txt` (also `gitignore`d). Press it

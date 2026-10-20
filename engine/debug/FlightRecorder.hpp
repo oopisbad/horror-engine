@@ -140,7 +140,10 @@ private:
     uint64_t frameSeq_ = 0;
     int anomalies_ = 0;
     int autoDumps_ = 0;
-    float sinceAutoDump_ = 0.0f;
+    // Starts past the cooldown so the *first* anomaly always dumps; the
+    // cooldown only throttles a repeating one (a snap that fires every step
+    // would otherwise write a file per step).
+    float sinceAutoDump_ = 1.0f;
     bool enabled_ = true;
     const char *pendingTeleport_ = nullptr;
 };

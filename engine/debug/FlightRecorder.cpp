@@ -211,8 +211,10 @@ void FlightRecorder::onAnomaly(uint32_t kinds, const StepTrace &cur)
     if (sinceAutoDump_ < kAutoDumpCooldown)
         return;
     sinceAutoDump_ = 0.0f;
-    if (dump("debug_dump.txt", std::format("auto: {}", names)))
-        ++autoDumps_;
+    // Count before writing so the dump's own header includes this one.
+    ++autoDumps_;
+    if (!dump("debug_dump.txt", std::format("auto: {}", names)))
+        --autoDumps_;
 }
 
 bool FlightRecorder::dump(const std::string &path, const std::string &reason)
