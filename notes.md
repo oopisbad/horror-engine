@@ -7,8 +7,12 @@ Items already listed under "Known issues / TODO" in `NOTES.md` (upside-down
 TGA screenshots, one skin shared by several nodes, alpha modes, etc.) are
 deliberately not repeated.
 
+Sections 1-10 come from the first read-through, 11-18 from a second pass over
+the same files plus the GLSL; the numbering is by severity across both.
+
 Severity: **high** = memory unsafety / crashes, **medium** = wrong behaviour
-that will show up in normal play, **low** = latent or diagnostic defects.
+that shows up in normal play or memory unsafety reachable from ordinary input
+(assets, gameplay calls), **low** = latent or diagnostic defects.
 
 | # | Severity | Where | Bug |
 | - | -------- | ----- | --- |
@@ -22,6 +26,14 @@ that will show up in normal play, **low** = latent or diagnostic defects.
 | 8 | low | `engine/render/Renderer.cpp:473-474` | Post pass hardcodes the camera near/far planes |
 | 9 | low | `engine/core/Window.cpp:127-130` | `resizedSinceLastFrame` can never be observed `true` |
 | 10 | low | `engine/asset/GltfAsset.cpp:299-311` | `decodeBase64()` shifts a signed `int` until it overflows (UB) |
+| 11 | medium | `engine/anim/AnimationSystem.cpp:293` | Looping clips drop every animation event that crosses the loop point |
+| 12 | medium | `engine/scene/Scene.hpp:69-76` | `view()` iterates the store it hands out; a callback that despawns UB-invalidates it |
+| 13 | medium | `engine/asset/GltfAsset.cpp:620-631` | glTF indices are never range-checked → OOB read/write in normal generation |
+| 14 | low | `engine/scene/CharacterController.cpp:319-321` | Standing up from a crouch ignores headroom and clips into ceilings |
+| 15 | low | `engine/render/Renderer.cpp:380` | A mesh with no material casts a shadow but is never drawn |
+| 16 | low | `engine/render/Renderer.cpp:117-125` | `tuneFlashlight()` is overwritten by `render()` every frame |
+| 17 | low | `engine/asset/GltfAsset.cpp:460-494` | Texture cache ignores the per-use sRGB flag |
+| 18 | low | `engine/core/Input.cpp:259-268` | `released()` bypasses the ImGui keyboard gate that `held()`/`pressed()` honour |
 
 ---
 
@@ -419,17 +431,384 @@ accumulated = ((accumulated << 6) | v) & 0xFFFFFF;   // keep 24 bits
 
 ---
 
+## 11. Looping clips drop animation events that cross the loop point (medium)
+
+**File:** `engine/anim/AnimationSystem.cpp:293` (guard), with the wrap handling
+it disables at `engine/anim/AnimationSystem.cpp:181-198`
+
+```cpp
+// update(), after wrapping newTime into [0, duration)
+if (!anim.currentLooping || newTime >= oldTime)
+    fireEvents(*current, oldTime, newTime, anim.currentLooping, anim.onEvent);
+```
+
+**What is wrong:** when a looping clip wraps, `newTime` is strictly smaller
+than `oldTime`, so this guard skips the `fireEvents()` call entirely — on
+exactly the frame that crossed the loop point. `fireEvents()` has a dedicated
+branch for that case (`if (looping && to < from)`, lines 187-192, which fires
+`(from, duration]` plus `[0, to]`), and the guard makes it unreachable: the
+only call site in the codebase is this one. So every `AnimationEvent` in the
+wrapped interval is silently dropped once per loop.
+
+Consequences for anything that uses events (footsteps, hit windows, sound
+cues): an event at the very end of a clip never fires at all (its only
+occurrence is in the wrapped interval); an event near the start fires on the
+first playthrough and then never again, because the wrap frame swallows it.
+There is no error, no log — the callback simply is not called.
+
+**Suggested fix:** call it unconditionally and let `fireEvents` decide, since
+it already distinguishes wrapping from monotonic advance:
+
+```cpp
+fireEvents(*current, oldTime, newTime, anim.currentLooping, anim.onEvent);
+```
+
+(`evaluate()` does not fire events, so nothing else needs to change; a
+non-looping clip has `from <= to` by construction, and the `(from, to]` test
+still gives the same result.)
+
+---
+
+## 12. `Scene::view()` invalidates its own iterator when a callback mutates the store (medium)
+
+**File:** `engine/scene/Scene.hpp:69-76`; the erase it collides with is
+`engine/scene/Scene.cpp:60-66`, insertion is `engine/scene/Scene.hpp:50-54`
+
+```cpp
+template<typename T, typename Fn>
+void view(Fn &&fn)
+{
+    auto &store = storesFor<T>();
+    for (auto &[id, comp] : store)   // range-for over the unordered_map
+        if (valid(id))
+            fn(id, comp);
+}
+```
+
+**What is wrong:** `view()` hands the callback a mutable reference *and* keeps
+iterating the container the reference came from. The documented component
+pattern makes both dangerous mutations natural inside a callback:
+
+* `scene.destroy(e)` erases `e` from that same `unordered_map` (`Scene::destroy`
+  drops every store entry, `Scene.cpp:60-66`). Erasing the element the loop is
+  currently on invalidates the loop's iterator; the implicit `++it` then runs on
+  a dead iterator — undefined behaviour, in practice a skipped element or a
+  crash in the bucket walk.
+* `scene.add<T>(...)` / `scene.create(...)` inserts into the map. A rehash
+  invalidates *every* iterator, so the iteration walks freed bucket storage.
+
+This is not hypothetical style-policing: `updateTriggers()`
+(`game/main.cpp:311-336`) is a `view<TriggerVolume>` whose whole purpose is to
+fire on entry, and `TriggerVolume` already carries `once`/`fired` fields for the
+one-shot case. The first gameplay code that despawns a fired trigger — or adds
+a pickup when a trigger fires — hits this. Right now nothing erases inside a
+`view`, so the defect is latent.
+
+**Suggested fix:** snapshot the ids first, then look each one up (also makes the
+"component removed by an earlier callback" case safe):
+
+```cpp
+template<typename T, typename Fn>
+void view(Fn &&fn)
+{
+    auto &store = storesFor<T>();
+    std::vector<EntityId> ids;
+    ids.reserve(store.size());
+    for (auto &[id, comp] : store)
+        if (valid(id)) ids.push_back(id);
+    for (EntityId id : ids)
+        if (auto *comp = find<T>(id)) fn(id, *comp);
+}
+```
+
+Alternatively document "do not add/remove components inside a view" and add a
+deferred-destroy queue; the snapshot is cheaper than debugging the crash.
+
+---
+
+## 13. glTF index values are never validated against the vertex count (medium)
+
+**File:** `engine/asset/GltfAsset.cpp:620-631`, consumed at `:636-639` by
+`generateNormals()` (`:317-334`) and `generateTangents()` (`:336-...`)
+
+```cpp
+if (prim.indices) {
+    geometry.indices.resize(prim.indices->count);
+    for (cgltf_size k = 0; k < prim.indices->count; ++k) {
+        cgltf_uint index = 0;
+        cgltf_accessor_read_uint(prim.indices, k, &index, 1);
+        geometry.indices[k] = index;          // no bounds check against pos->count
+    }
+}
+```
+
+**What is wrong:** `cgltf_accessor_read_uint()` converts a number out of the
+buffer; it does not know or care that the value must name a vertex. Nothing in
+this loader compares indices against `pos->count`, and the very next step uses
+them as subscripts:
+
+```cpp
+Vertex &a = verts[indices[i]];   // GltfAsset.cpp:322 (same in generateTangents)
+a.normal += n;                   // writes through the out-of-range reference
+```
+
+So a glTF whose index accessor references a vertex past POSITION — a truncated
+re-export, a hand-edited asset, a 16-bit index from a tool that merged meshes
+wrong — reads and *writes* out of bounds during load. This is heap corruption,
+not a visual glitch, and it happens before any validation the engine does
+(`Mesh`'s `HOR_CHECK`s do not look at indices at all, and are compiled out in
+the default build anyway — finding 2). If the accessor *does* supply normals so
+the generators are skipped, the bad index instead reaches `glDrawElements`,
+which reads past the end of the index buffer.
+
+**Suggested fix:** range-check while copying; one comparison per index is free
+relative to the file I/O:
+
+```cpp
+cgltf_uint index = 0;
+cgltf_accessor_read_uint(prim.indices, k, &index, 1);
+if (index >= pos->count) {
+    HOR_LOG_WARN("glTF mesh '{}' primitive {}: index {} >= {} vertices; skipping primitive",
+        mesh.name, pi, index, pos->count);
+    bad = true;
+    break;
+}
+geometry.indices[k] = index;
+```
+
+and `continue` the primitive loop when `bad` is set (also drop the primitive if
+`prim.indices->count % 3 != 0`, which the triangle generators currently just
+truncate silently).
+
+---
+
+## 14. Standing up from a crouch ignores headroom (low)
+
+**File:** `engine/scene/CharacterController.cpp:119` (`targetHeight`) and
+`:319-321` (the lerp), with the overlap helper at `:135-146`
+
+```cpp
+float targetHeight = wantCrouch ? cc->crouchHeight : cc->height;   // 119
+...
+cc->currentHeight = glm::mix(cc->currentHeight, targetHeight, std::min(dt * 10.0f, 1.0f));
+```
+
+**What is wrong:** releasing Crouch immediately sets the target back to the full
+standing height, and `currentHeight` (which *is* the collider's height, see
+`playerHalf()`) expands with no `overlapsAny()` test. A player who crouches
+under a 1.2 m ledge, vent or stairwell and stands up grows the box into the
+ceiling collider from the inside. The resolution cannot recover from that:
+`collideAxis()` deliberately ignores colliders the body was already inside
+before the move (that is what keeps the player from being ejected out of the
+floor, `:196-200`), so nothing pushes the body back down or blocks the growth.
+The visible result is the camera/head clipping through solid geometry, plus the
+body being able to occupy gaps shorter than the standing height — exactly the
+spaces the level author used a low ceiling to forbid.
+
+**Suggested fix:** only grow when there is room, and re-check every step rather
+than latching the target:
+
+```cpp
+if (targetHeight > cc->currentHeight) {
+    const float saved = cc->currentHeight;
+    cc->currentHeight = targetHeight;          // probe at the target size
+    if (overlapsAny()) {
+        cc->currentHeight = saved;             // no headroom: stay low
+        targetHeight = saved;
+    }
+}
+cc->currentHeight = glm::mix(cc->currentHeight, targetHeight, std::min(dt * 10.0f, 1.0f));
+```
+
+(`overlapsAny()` already ignores `resolveCollisions == false` geometry, so a
+trigger volume will not block standing up.)
+
+---
+
+## 15. A mesh with no material casts a shadow but is never drawn (low)
+
+**File:** `engine/render/Renderer.cpp:380` (main pass) versus `:322-323`
+(shadow pass); the item is queued at `:197-203` with no material check
+
+```cpp
+// shadowPass
+if (!item.castsShadow || !item.mesh)   // 322
+    return;                             // material never consulted
+
+// mainPass
+if (!item.material || (item.bones != nullptr) != skinnedPass)   // 380
+    continue;
+```
+
+**What is wrong:** `buildQueue()` enqueues every visible `MeshRenderer` with a
+non-null mesh regardless of `material`, and `LevelBuilder` can legitimately
+leave it null (`LevelBuilder.cpp:205-209` falls back to `nullptr`
+when a primitive's material index is out of range). The shadow pass draws such
+an item (its shaders do not need a material), while the main pass silently
+skips it — no log, no `itemsCulled` increment. The object is therefore
+invisible yet casts a fully lit-looking shadow, and the stats report a shadow
+draw for something that was never on screen. The comment above the main-pass
+loop even claims the opposite ("a material without one still draws", meaning a
+material without a *shader*).
+
+**Suggested fix:** pick one behaviour and make both passes agree. Cheapest is
+to draw with the defaults the renderer already has (placeholder texture, default
+uniform values) by removing the `!item.material` early-out and guarding each
+field read; otherwise skip the item in `buildQueue()` with
+`HOR_LOG_WARN_ONCE("mesh '{}' has no material", ...)` so the missing material
+is visible instead of magic.
+
+---
+
+## 16. `tuneFlashlight()` has no effect: `render()` overwrites it every frame (low)
+
+**File:** `engine/render/Renderer.cpp:117-125` (the setter) and `:265-270`
+(the reset at the top of `render()`), overwritten again at `:277-282`
+
+```cpp
+void ForwardRenderer::tuneFlashlight(float innerDeg, float outerDeg, float range, float intensity)
+{
+    flashlightInnerDeg_ = innerDeg;      // 121-124
+    ...
+}
+
+void ForwardRenderer::render(Scene &scene, Camera &camera)
+{
+    flashlightInnerDeg_ = 18.0f;         // 265: back to the hardcoded defaults
+    flashlightOuterDeg_ = 24.0f;
+    flashlightRange_ = 45.0f;
+    flashlightIntensity_ = 8.0f;
+    ...
+    scene.view<SpotLight>([&](EntityId id, const SpotLight &sl) {
+        flashlightInnerDeg_ = sl.innerConeDeg;   // 277: and then the component wins
+        ...
+    });
+```
+
+**What is wrong:** the four tuned members are reset to literals at the start of
+every frame and then overwritten from the first `SpotLight` component, so any
+value written through `tuneFlashlight()` is discarded before the next shadow /
+lighting pass reads it. The API is public, documented as the gameplay hook for
+"battery flicker / cone widening while sprinting", and is a silent no-op — the
+next person to wire sprint-widening will see no change and go looking in the
+shader. There are no callers today (`grep` across `engine/` and `game/` finds
+only the definition), so this is latent, not currently visible.
+
+**Suggested fix:** apply the tuning *after* the component read (e.g. as
+multipliers/offsets applied to the gathered values), or move the gathered
+state into locals and let `tuneFlashlight()` own the defaults. If neither is
+wanted yet, deleting the setter is better than shipping a hook that cannot
+work.
+
+---
+
+## 17. Texture cache ignores the per-use sRGB flag (low)
+
+**File:** `engine/asset/GltfAsset.cpp:460` (cache), `:462-466` (lookup),
+`:494` (insert); the differing flags are passed at `:514`, `:517` and `:523`
+
+```cpp
+std::unordered_map<const cgltf_texture *, std::shared_ptr<Texture>> textureCache;
+auto loadTexture = [&](const cgltf_texture *tex, bool srgb) -> std::shared_ptr<Texture> {
+    auto it = textureCache.find(tex);        // key is the texture only
+    if (it != textureCache.end())
+        return it->second;                   // returns the first use's decode flag
+    ...
+    params.srgb = srgb;
+    textureCache[tex] = texture;              // only the first caller's flag is honoured
+};
+```
+
+**What is wrong:** the key is the `cgltf_texture*` alone, but the same texture
+is requested with different `srgb` values depending on the slot: base colour
+wants `true`, normal and metallic-roughness want `false`. Whichever material is
+loaded first decides the decode for every later user of that image. Reusing one
+texture as both an albedo map and a data map is legal glTF, and the engine
+needs both interpretations.
+
+Today this is masked by finding 6 (`srgb` is recorded but never used), which is
+why it is listed as low — but it is an independent defect: fixing finding 6 by
+selecting `GL_SRGB8_ALPHA8` without changing this key will silently mis-decode
+one of the two uses, and the symptom (a normal map read as sRGB, or an albedo
+map read as linear) will look like a shader bug.
+
+**Suggested fix:** include the flag in the key, or key on the image instead
+(two `cgltf_texture` objects may share one `cgltf_image`):
+
+```cpp
+std::map<std::pair<const cgltf_image *, bool>, std::shared_ptr<Texture>> textureCache;
+```
+
+---
+
+## 18. `Input::released()` bypasses the ImGui keyboard gate (low)
+
+**File:** `engine/core/Input.cpp:259-268`, versus `:271-287`
+
+```cpp
+bool Input::released(Action a) const
+{
+    const auto &map = bindings_[(size_t)a];
+    for (int key : map) {
+        if (key == kUnknown)
+            continue;
+        if (keys_[key].wasDown && !keys_[key].isDown)   // raw state only
+            return true;
+    }
+    return false;
+}
+
+bool Input::keyHeld(int key) const
+{
+    ...
+    if (!mouseCaptured_ && keyboardWantedByImGui)
+        return false;   // overlay eats keyboard while visible + focused
+```
+
+**What is wrong:** `keyHeld()` and `keyPressed()` both suppress input while an
+ImGui text field owns the keyboard; `released()` does not. With the F1 overlay
+open and a field focused, pressing a bound key reports nothing, but releasing it
+reports a release — an edge with no matching press, from input the engine
+explicitly declared as UI input. Nothing consumes `released()` for gameplay
+today (only the key-edge self-test at `game/main.cpp:801`), so this is latent,
+but any future "release to stop firing / release to stop sprinting" action gets
+a spurious trigger the moment the player types in the overlay.
+
+**Suggested fix:** give `released()` the same early-out, or factor the gate into
+a helper used by all three:
+
+```cpp
+bool Input::actionKeyActive(int key) const
+{
+    return key >= 0 && key <= GLFW_KEY_LAST
+        && !(!mouseCaptured_ && keyboardWantedByImGui);
+}
+```
+
+---
+
 ## Checked and found clean
 
 Worth recording so the review is not read as exhaustive-by-omission: the
 transform/bone-space math in `AnimationSystem::evaluate` (mesh-node inverse,
-joint positions, crossfade weights), `Mesh` primitive winding/normal/tangent
-generation, the axis-separated swept collision resolver (step-up, sub-stepping,
-ground probes) and its `--selftest` coverage, the GL object lifetimes
+joint positions, crossfade weights — the event bookkeeping beside it is finding
+11), `Mesh` primitive winding/normal/tangent generation, the axis-separated
+swept collision resolver (step-up, sub-stepping, ground probes) and its
+`--selftest` coverage (crouch growth is finding 14), the GL object lifetimes
 (`Scene`/`AssetLibrary`/`Renderer`/`Window` member order all destroy GL objects
 before the context), `Shader` hot-reload failure handling (a failed compile keeps
 the previous program and does not leak the stages), `Framebuffer` depth-only
 setup, and the flight-recorder ring buffers (previous-slot indexing and the
-rate-limited dump are correct). The engine is single-threaded by design
-(`Logger`, `Input::active_`, `FlightRecorder` are all touched only from the main
-thread), so no data races were found.
+rate-limited dump are correct).
+
+On the second pass the shader pair was checked too: `mesh.vert` and
+`shadow_depth.vert` build the same LBS matrix from the same UBO layout (so
+skinned shadows track the body), `sampleShadow` remaps NDC correctly and rejects
+out-of-frustum samples, `post.frag`'s linear-depth reconstruction matches the
+perspective matrix `Camera::update` builds (the constants are wrong, finding 8,
+not the formula), and the fullscreen-triangle `post.vert` covers the viewport
+with matching UVs. Also verified clean: the `Input` re-baseline windows (sample
+and frame counters, warp drop, focus sampling), and the identity/order of
+`Scene::destroy`'s store erases for a leaf entity. The engine is single-threaded
+by design (`Logger`, `Input::active_`, `FlightRecorder` are all touched only from
+the main thread), so no data races were found.
