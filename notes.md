@@ -8,7 +8,11 @@ TGA screenshots, one skin shared by several nodes, alpha modes, etc.) are
 deliberately not repeated.
 
 Sections 1-10 come from the first read-through, 11-18 from a second pass over
-the same files plus the GLSL; the numbering is by severity across both.
+the same files plus the GLSL, and 19-25 from a third pass over `game/main.cpp`,
+the controller/camera path, `Shader` hot reload and the level-import options.
+The numbering is chronological by pass and each pass is ordered by severity
+within itself, so a low from pass 1 can precede a medium from pass 2; it is not
+a single global ranking.
 
 Severity: **high** = memory unsafety / crashes, **medium** = wrong behaviour
 that shows up in normal play or memory unsafety reachable from ordinary input
@@ -34,6 +38,13 @@ that shows up in normal play or memory unsafety reachable from ordinary input
 | 16 | low | `engine/render/Renderer.cpp:117-125` | `tuneFlashlight()` is overwritten by `render()` every frame |
 | 17 | low | `engine/asset/GltfAsset.cpp:460-494` | Texture cache ignores the per-use sRGB flag |
 | 18 | low | `engine/core/Input.cpp:259-268` | `released()` bypasses the ImGui keyboard gate that `held()`/`pressed()` honour |
+| 19 | medium | `engine/scene/CharacterController.cpp:366-367` | Head-bob is folded into `Camera::position` and added again by `Camera::update` |
+| 20 | low | `engine/scene/CharacterController.cpp:347` | Bob sway is applied along world +X instead of camera-right |
+| 21 | low | `engine/render/Renderer.cpp:265-286` | The flashlight is whichever `SpotLight` the store visits last |
+| 22 | low | `engine/render/Shader.cpp:237-239` | A failed hot reload records the new mtime, so it is never retried |
+| 23 | low | `engine/scene/CharacterController.cpp:271-273` | The sub-step clamp can exceed its own 8 cm bound on long falls |
+| 24 | low | `engine/asset/LevelBuilder.cpp:85-95` | Skipped marker nodes lose their transform for their children |
+| 25 | low | `engine/asset/LevelBuilder.cpp:160-180` | `TRIGGER_` without a mesh creates a zero-size volume at the world origin |
 
 ---
 
@@ -787,19 +798,264 @@ bool Input::actionKeyActive(int key) const
 
 ---
 
+## 19. Head-bob is folded into the eye twice (medium)
+
+**File:** `engine/scene/CharacterController.cpp:359-368` and
+`engine/render/Camera.cpp:47`; the intended split is documented at
+`engine/render/Camera.hpp:12-14` ("controller writes a bobOffset + bobRoll ...
+camera folds it into view/orientation") and `:29`
+
+```cpp
+// CharacterController.cpp:366-367 -- the eye already includes the bob, and the
+// same offset is then published for the camera to fold in again.
+hooks.camera->position = xf.position + glm::vec3(0.0f, eyeHeight, 0.0f) + cc->bobOffset;
+hooks.camera->bobOffset = cc->bobOffset;
+
+// Camera.cpp:47 -- added a second time when the view matrix is built.
+glm::vec3 eye = position + bobOffset;
+```
+
+**What is wrong:** the controller folds the head-bob into `Camera::position`
+*and* stores the same offset in `Camera::bobOffset`; `Camera::update` then adds
+it once more. The rendered eye is `feet + eyeHeight + 2 * bob`, so the walk bob
+is 6 cm instead of 3 cm (`kBobVertical`) and the sway 8 cm instead of 4 cm
+(`kBobLateral`), while the roll stays at its authored amplitude because it is
+only applied inside `Camera::update` (`:55-57`). The offset and the roll no
+longer describe the same head motion.
+
+The double offset also undoes the measured improvement from NOTES bug 23. The
+landing-bob self-test (`game/main.cpp:830-850`) measures
+`cam.position.y - feet.y`, i.e. *one* of the two offsets, so the 2.0 mm landing
+step it reports is about 4 mm of real eye motion and the "5.6 mm worst" over the
+jump is about 11 mm — past the test's own 10 mm threshold. In other words the
+regression test cannot see this bug: it measures the controller, not the view.
+A smaller inconsistency: `uCameraPos` (specular) is uploaded from
+`camera.position`, which carries one bob, while the view matrix is built from
+the eye carrying two, so highlights and geometry disagree about where the eye
+is while walking.
+
+**Suggested fix:** give the offset a single owner. Keep the controller
+authoritative for `position = feet + eyeHeight` and let `Camera::update` add
+`bobOffset` (then rotate it as in finding 20), or drop the addition in
+`Camera::update` and delete the duplicate field. Whichever way, make
+`Camera::position` the value the view actually uses so the flashlight and the
+self-test agree with the image.
+
+---
+
+## 20. Head-bob sway is applied along world +X, not camera-right (low)
+
+**File:** `engine/scene/CharacterController.cpp:346-349`, consumed at
+`engine/render/Camera.cpp:47`; `Camera.hpp:29` calls the field a "world-space eye
+offset along local up/right"
+
+```cpp
+cc->bobOffset.y = -std::abs(std::sin(cc->bobPhase)) * kBobVertical * amp;
+cc->bobOffset.x = std::cos(cc->bobPhase * 0.5f) * kBobLateral * amp;  // "sideways"
+cc->bobOffset.z = 0.0f;
+...
+glm::vec3 eye = position + bobOffset;   // added straight to the world position
+```
+
+**What is wrong:** `bobOffset.x` is the side-to-side sway, but it is added to
+the world-space eye along +X, which equals camera-right only at yaw 0.
+Camera-right is `(cos yaw, 0, -sin yaw)`: at yaw 90 degrees the sway is exactly
+along the view axis (a forward/back pump), and at yaw 180 degrees it is
+inverted left/right. Walking while facing east or west makes the camera breathe
+toward and away from the wall instead of swaying side to side. The amplitude is
+small (4 cm, doubled to 8 cm by finding 19), but this is the one component of
+the bob that is supposed to be lateral, and it silently changes character with
+the yaw the player happens to be facing. `bobOffset.z` is always 0, so nothing
+rotates the offset into the camera basis.
+
+**Suggested fix:** treat the offset as camera-local, e.g.
+`eye += right() * bobOffset.x + up() * bobOffset.y` inside `Camera::update`
+(after the roll, if the sway should follow the head), or rotate it by yaw in
+the controller. Do it in one place, together with finding 19.
+
+---
+
+## 21. The flashlight is whichever `SpotLight` the store visits last (low)
+
+**File:** `engine/render/Renderer.cpp:265-286`; spot lights are imported as
+components by `engine/asset/LevelBuilder.cpp:117-124`
+
+```cpp
+flashlightInnerDeg_ = 18.0f;                  // defaults at the top of render()
+...
+scene.view<SpotLight>([&](EntityId id, const SpotLight &sl) {
+    flashlightInnerDeg_ = sl.innerConeDeg;    // overwritten for every light
+    ...
+    flashlightPos_ = glm::vec3(world[3]);
+    flashlightDir_ = dir / len;               // last visited wins
+    hasFlashlightTransform_ = true;
+});
+```
+
+**What is wrong:** the renderer has one flashlight slot, but the scene can hold
+several `SpotLight`s: the game's camera light plus any `KHR_lights_punctual`
+spot imported from a level. `scene.view` walks an `unordered_map` keyed by
+entity id, so the winner depends on bucket layout, not on authoring or creation
+order. If a level spot light is visited last, the shadow map, the cone and the
+beam origin follow that fixed fixture and the player's flashlight stops
+tracking the camera; the debug draw (`:500`) still draws both, so the scene
+looks like it has two correctly placed lights. Adding unrelated entities can
+rehash the map and change the winner between runs.
+
+**Suggested fix:** address the flashlight explicitly — e.g.
+`setFlashlight(EntityId)` called by gameplay and a direct component lookup —
+and skip other spot lights in the gather (or support N spot lights properly
+later). When no flashlight is set, keep the existing camera-basis fallback.
+
+---
+
+## 22. A failed shader hot reload is recorded as success and never retried (low)
+
+**File:** `engine/render/Shader.cpp:226-241`
+
+```cpp
+bool ok = tryLoadProgram();      // false: compile/link failed, old program kept
+vertRef_.lastWrite = vt;         // ...but the new mtimes are committed anyway
+fragRef_.lastWrite = ft;
+if (ok) { reflectUniforms(); HOR_LOG_INFO("shader reloaded [{}]", name_); }
+```
+
+**What is wrong:** the comment above (`:228-231`) promises that a mid-save
+truncation is skipped and retried next frame, but that only happens when the
+*vertex* file cannot be opened (`probe`, `:233`). The normal mid-save state is
+both files readable and the new source failing to compile; `tryLoadProgram()`
+then returns false, and because `lastWrite` is still advanced,
+`checkHotReload()` sees no change on later frames. The old program keeps
+running (which is correct), but the reload is lost until the file changes
+again. An editor that truncates and rewrites within one timestamp tick, or a
+tool that copies with the original mtime, leaves the old shader running
+indefinitely even though the file on disk is the fixed version. The failure is
+only visible as one error line from `tryLoadProgram`, and `lastError_` is not
+surfaced anywhere else.
+
+**Suggested fix:** only commit `lastWrite` when `ok` is true; on failure keep
+the old stamps so the next frame retries (rate-limit the error log so a
+permanently broken shader cannot spam). Probe both stages for readability
+before rebuilding, not just the vertex file.
+
+---
+
+## 23. The sub-step clamp can exceed its own movement bound on long falls (low)
+
+**File:** `engine/scene/CharacterController.cpp:30-31` (constants) and
+`:266-273`; the guarantee is stated at `:24-30` and in `NOTES.md` ("Sub-stepping
+caps movement at 8 cm per collision pass (8 passes max per fixed step)")
+
+```cpp
+const float travel = glm::length(cc->velocity) * dt;
+const int substeps = std::clamp(
+    static_cast<int>(std::ceil(travel / kMaxSubStep)), 1, kMaxSubSteps);  // 8
+const float h = dt / static_cast<float>(substeps);
+```
+
+**What is wrong:** the pass count is clamped to 8 but the distance is not, so
+once `travel > kMaxSubSteps * kMaxSubStep` (0.64 m) a single pass moves further
+than the 8 cm the comment says is the maximum, and the "a fast fall can never
+cross a collider between two overlap tests" claim no longer holds. Vertical
+velocity has no terminal clamp (gravity is -13; `velocity.y` is only assigned
+by the jump impulse and by landing), so the bound can be exceeded by ordinary
+falling: after about 2.3 s (v ~= 30 m/s, ~34 m dropped) each pass is already
+6 cm — the thin-wall thickness used by the self-test — and after 4 s
+(v ~= 52 m/s) it is 11 cm. At that point `collideAxis` can start a pass in
+front of a collider and end behind it without ever overlapping. The current
+corridor has no such drop, so this is latent; a pit, a stairwell or any
+velocity impulse would expose it. The rest of the resolver is sound; crouch
+growth is finding 14.
+
+**Suggested fix:** derive the pass count from the actual distance and do not
+clamp it below what the distance needs (cap at, say, 64 and handle the
+remaining move explicitly), or clamp fall speed to
+`kMaxSubSteps * kMaxSubStep / dt` (~38 m/s at 60 Hz), which makes the existing
+8-pass budget provably sufficient.
+
+---
+
+## 24. Skipped marker nodes lose their transform for their children (low)
+
+**File:** `engine/asset/LevelBuilder.cpp:85-95`
+
+```cpp
+if ((isCollision && !options.importCollision) || (isSpawn && !options.importSpawnPoints)
+    || (isTrigger && !options.importTriggers)) {
+    // Still walk children so a disabled marker doesn't orphan a subtree;
+    // children attach to the parent's entity instead.
+    for (int child : node.children)
+        buildNode(child, parentEntity);
+    return;
+}
+```
+
+**What is wrong:** when an import option turns a marker node off, no entity is
+created for it, so its local translation/rotation/scale is never applied; its
+children are built directly under `parentEntity` with their own local TRS,
+which is relative to the skipped node. Every descendant is therefore placed as
+if the marker sat at the parent's origin. With `importTriggers = false` (a
+render-only or collision-only import), a `TRIGGER_` node with a translation —
+which is how Blender authors place one — silently moves its whole subtree. The
+defaults import all three kinds, so the bug is dormant until a caller uses the
+options, but the comment presents the re-parenting as harmless when it is only
+harmless for an identity transform.
+
+**Suggested fix:** create a transform-only entity for the skipped node (no
+components, so it costs one Transform) and use it as `parentEntity`; or
+pre-multiply the skipped node's local matrix into each descendant's local
+transform before recursing.
+
+---
+
+## 25. A `TRIGGER_` node without a mesh becomes a zero-size volume at the world origin (low)
+
+**File:** `engine/asset/LevelBuilder.cpp:160-180`; `TriggerVolume` defaults at
+`engine/scene/Components.hpp:67-70`
+
+```cpp
+TriggerVolume trigger;
+trigger.tag = node.name.substr(8);
+if (haveBounds) {
+    ... trigger.worldMin = mn; trigger.worldMax = mx;
+}
+scene.add(entity, trigger);   // no bounds: worldMin == worldMax == (0,0,0)
+```
+
+**What is wrong:** `haveBounds` is false when the node has no mesh (or all its
+primitives were skipped), and the component is added anyway. `TriggerVolume`'s
+fields are *world-space* and default to zero, so the trigger is not at the
+node: it is a degenerate box at the map origin. The runtime test in
+`game/main.cpp` (`updateTriggers`) only needs the player's body box to straddle
+it, so a body below y = 0 near the origin fires it, and the debug draw shows a
+zero-size blue box at the origin with no indication of which node it belongs
+to. `COL_` nodes in the same situation warn and skip; `TRIGGER_` is silent, so
+the author gets neither a volume in the right place nor a message saying why.
+
+**Suggested fix:** warn and skip the component when there are no bounds
+(matching `COL_`), or build a default volume from extras / the node transform
+so the trigger is still usable.
+
+---
+
 ## Checked and found clean
 
 Worth recording so the review is not read as exhaustive-by-omission: the
 transform/bone-space math in `AnimationSystem::evaluate` (mesh-node inverse,
 joint positions, crossfade weights — the event bookkeeping beside it is finding
 11), `Mesh` primitive winding/normal/tangent generation, the axis-separated
-swept collision resolver (step-up, sub-stepping, ground probes) and its
-`--selftest` coverage (crouch growth is finding 14), the GL object lifetimes
+swept collision resolver (step-up and ground probes; the sub-step budget is
+finding 23 and crouch growth finding 14), the GL object lifetimes
 (`Scene`/`AssetLibrary`/`Renderer`/`Window` member order all destroy GL objects
 before the context), `Shader` hot-reload failure handling (a failed compile keeps
-the previous program and does not leak the stages), `Framebuffer` depth-only
-setup, and the flight-recorder ring buffers (previous-slot indexing and the
-rate-limited dump are correct).
+the previous program and does not leak the stages; losing the retry is finding
+22), `Framebuffer` depth-only setup, and the flight-recorder ring buffers
+(previous-slot indexing and the rate-limited dump are correct).
+
+The `--selftest` coverage was checked too, with one caveat: the landing-bob
+check reads `Camera::position`, i.e. only half of the rendered eye motion, so it
+cannot see finding 19; the other movement, trigger and mouse checks do exercise
+the paths they claim to.
 
 On the second pass the shader pair was checked too: `mesh.vert` and
 `shadow_depth.vert` build the same LBS matrix from the same UBO layout (so
