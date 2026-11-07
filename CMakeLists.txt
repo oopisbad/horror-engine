@@ -51,6 +51,10 @@ add_library(imgui STATIC
     ${imgui_SOURCE_DIR}/backends/imgui_impl_opengl3.cpp
 )
 target_include_directories(imgui PUBLIC ${imgui_SOURCE_DIR} ${imgui_SOURCE_DIR}/backends)
+# imgui_impl_glfw.cpp includes <GLFW/glfw3.h>. The host build used to find a
+# system GLFW header by accident; a cross build has none, so make the fetched
+# target's include directory explicit.
+target_link_libraries(imgui PUBLIC glfw)
 
 # GLAD loader generated with `glad --api="gl:core=4.5"`; checked in so builds
 # don't need python/network. Regenerate only when bumping the GL version.

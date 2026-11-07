@@ -18,6 +18,52 @@ Severity: **high** = memory unsafety / crashes, **medium** = wrong behaviour
 that shows up in normal play or memory unsafety reachable from ordinary input
 (assets, gameplay calls), **low** = latent or diagnostic defects.
 
+## Resolution status (branch `bug-review-notes`, 2026-11-07)
+
+All 25 findings are fixed. The table below is the original review, kept as the
+problem statement; `NOTES.md` records the change made for each number. The
+fixes are on `bug-review-notes`, not on `master`.
+
+What was verified locally (CachyOS, Intel UHD 600; no RX 580 or RTX 5070 in
+this machine, no Windows runtime):
+
+* `--selftest` passes **35/35** on a clean host build, including new checks for
+the previously latent defects: crouch headroom (14), `destroy()` child
+  re-homing (3), `view()` mutation during iteration (12), timestep backlog (4),
+  loop-crossing animation events (11), trigger world bounds (5), and a
+  single-application bob check that reconstructs the eye from the view matrix
+  (19/20).
+* The same self-test and a `--screenshot` at 1281x720 (a width the old
+  readback overflowed) run clean under AddressSanitizer + UndefinedBehaviorSanitizer;
+  the TGA is exactly `1281*720*3 + 18` bytes.
+* A `-DNDEBUG` program confirms `HOR_ASSERT` is skipped and `HOR_CHECK` aborts
+  (finding 2).
+* Shader hot reload was exercised for real: broke `post.frag`, restored it
+  without changing its mtime, and observed the throttled retry log
+  `shader reloaded [post]` (finding 22).
+* Linux package extracted outside the repo and launched from its own directory;
+  `assets/` and `shaders/` resolve relative to the working directory.
+* Windows x86-64 release cross-compiled with llvm-mingw 2026-11-04 (UCRT,
+  `-static` libc++/libunwind): 3.9 MB PE32+ console exe. Imports are only the
+  Windows-provided UCRT `api-ms-win-crt-*` plus KERNEL32, USER32, GDI32 and
+  SHELL32; GLFW is static and GLAD loads `opengl32.dll` at runtime. The zip was
+  re-extracted and its exe hash matches the build output.
+* Two build-system defects surfaced only when cross-compiling: imgui's GLFW
+  backend was silently using a system GLFW header (now `imgui` links `glfw`
+  explicitly), and the toolchain file now defaults `MINGW_ROOT` so CMake's
+  `try_compile` children, which do not inherit `-D`/environment, can find the
+  compiler.
+
+Not verified: the Windows executable has never been run (no Windows host or
+Wine here), and neither GPU was available. RX 580 on Windows 11 is the primary
+release target; AMD lists OpenGL 4.5 for the card, exactly the engine's core
+requirement, but real Adrenalin behaviour, shader compilation and VRAM use on
+that hardware are still untested.
+
+Release: tag `v0.1.0-beta` attaches
+`horror-engine-0.1.0-windows-x86_64.zip` (Windows, RX 580 / Windows 11 focus)
+and `horror-engine-0.1.0-linux-x86_64.tar.gz`.
+
 | # | Severity | Where | Bug |
 | - | -------- | ----- | --- |
 | 1 | high | `engine/core/Application.cpp:168-169` | Screenshot readback ignores `GL_PACK_ALIGNMENT` → heap overflow |

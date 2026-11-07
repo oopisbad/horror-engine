@@ -23,6 +23,27 @@ Shaders live in `shaders/` and are copied next to the executable by the
 polling file mtimes (editing either stage recompiles; a broken edit keeps the
 previous working program).
 
+### Windows cross-build (llvm-mingw, UCRT)
+
+The repo builds a portable 64-bit Windows exe from Linux. The toolchain is not
+checked in: unpack an llvm-mingw UCRT release into
+`external/downloads/llvm-mingw` (or pass `-DMINGW_ROOT=...`).
+
+```bash
+cmake -S . -B build-win64 -G Ninja \
+  -DCMAKE_TOOLCHAIN_FILE=cmake/toolchain-mingw64.cmake \
+  -DMINGW_ROOT="$PWD/external/downloads/llvm-mingw" \
+  -DCMAKE_BUILD_TYPE=Release
+cmake --build build-win64 -j$(nproc)
+```
+
+`-static` links libc++, libunwind and the compiler runtime, so the exe imports
+only OS DLLs (`api-ms-win-crt-*`, KERNEL32, USER32, GDI32, SHELL32); GLFW is
+static and GLAD loads `opengl32.dll` at runtime. Build output is
+`build-win64/game.exe` (~3.9 MB), with `shaders/` synced next to it. Package
+`game.exe`, `assets/`, `shaders/` and `NOTES.md` together; the executable
+resolves both directories relative to its working directory.
+
 ### Debug CLI
 
 ```
@@ -727,6 +748,26 @@ Low:
     parent's origin.
 25. A `TRIGGER_` node with no geometry warns and creates no component (it used
     to become a zero-size volume at the world origin).
+
+## Release status — v0.1.0-beta (2026-11-07)
+
+Tag `v0.1.0-beta` on `bug-review-notes` publishes both archives:
+`horror-engine-0.1.0-linux-x86_64.tar.gz` (1.3 MB) and
+`horror-engine-0.1.0-windows-x86_64.zip` (1.8 MB, Windows 11 / RX 580 target).
+
+Verified here (CachyOS, Intel UHD 600): clean host build with `--selftest`
+35/35; ASan+UBSan self-test and a 1281x720 screenshot clean and exactly sized;
+a `-DNDEBUG` check of `HOR_CHECK`/`HOR_ASSERT`; the shader hot-reload retry; the
+Linux package extracted and launched outside the repo; the Windows exe inspected
+with `llvm-readobj`/`llvm-objdump` and its zip re-extracted with a matching exe
+hash.
+
+Not verified: the Windows exe has not been executed (no Windows host/Wine), and
+neither the RX 580 (Windows 11) nor the RTX 5070 was available. AMD lists
+OpenGL 4.5 for the RX 580, exactly the engine's core requirement, but
+driver-specific shader, VRAM and frame-rate behaviour on that card remain
+untested. Treat this build as an untested cross-build, not a hardware-verified
+release.
 
 ## Known issues / TODO
 
