@@ -45,19 +45,22 @@ Input debugging (added in the movement/mouse pass):
   synthetic input before the render loop. Commands: `hold <KEY[+KEY]> <steps>`,
   `release <KEY>`, `wait <steps>`, `mouse <dx> <dy>`. Keys: W A S D SPACE SHIFT
   CTRL. `hold` presses for exactly N steps, then releases.
-- `--selftest` runs a 27-check scripted assertion matrix (walk W/A/S/D,
+- `--selftest` runs a 35-check scripted assertion matrix (walk W/A/S/D,
   diagonal, sprint, crouch, idle, jump, corridor wall stop, 0.2 m step-offset,
   6 cm thin-wall, mouse right/up/invert, key edges, landing bob continuity,
+  bob applied once (view matrix vs. `position + bobOffset`), crouch headroom,
   red-ball trigger, mouse warp guard, resync counter, single-step look-spike
-  rejection, flashlight beam aim, crouch eye height) on a private platform
-  away from the corridor and exits non-zero on failure. It needs a GL window
-  (Application owns the scene/camera), so it is scripted rather than fully
-  headless. The
-  last four checks are the sample models: the lowest vertex (rest pose and
+  rejection, flashlight beam aim, crouch eye height, destroy reparents, view
+  mutation, timestep backlog, trigger bounds, animation loop events) on a
+  private platform away from the corridor and exits non-zero on failure. It
+  needs a GL window (Application owns the scene/camera), so it is scripted
+  rather than fully headless. The
+  last five checks are the sample models: the lowest vertex (rest pose and
   every sampled pose of the playing clip, 24 samples) must sit on `kFloorTopY`
   (0.05 m) within 1 mm, the foot/head vertex must stay within 0.30/0.60 m of
-  the joint the overlay draws, and no joint may fall outside the skinned body.
-  The selftest loads the sample models even without `--test-models`.
+  the joint the overlay draws, no joint may fall outside the skinned body, and
+  the base-colour texture's internal format must be sRGB. The selftest loads
+  the sample models even without `--test-models`.
 - `--test-models` loads `assets/test/CesiumMan.glb` and `Fox.glb` into the test
   scene. Default is off: the base scene is the procedural corridor + crates
   only. With the flag, the two models flank the corridor just ahead of the
@@ -619,12 +622,119 @@ level root +/-0.5 m along the model's own facing at 0.6 m/s (CesiumMan) and
 0.45 m/s (Fox), turning around at the ends. Patrolling is gameplay moving a
 transform; nothing about the skinning changes.
 
+## Bug-review pass (`notes.md`, 25 findings)
+
+All 25 defects in the independent review on the `bug-review-notes` branch are
+fixed. Numbering below matches that report; 5 covers both marker types and 19
+covers the sway finding (20), because they share one code path.
+
+High / medium:
+
+1. **Screenshot heap overflow** — `glReadPixels(GL_RGB)` honours
+   `GL_PACK_ALIGNMENT` (4), so a width whose `3*w` is not a multiple of 4
+   (1281, 1366, ...) wrote up to 3 bytes per row past the `w*h*3` buffer, and
+   the tightly-packed flip sheared the image. Readback now sets
+   `GL_PACK_ALIGNMENT` to 1 (restoring 4 afterwards), sizes the buffer
+   defensively, rejects zero-size framebuffers and checks `glGetError()`.
+   Verified under ASan at 1281x720: exact file size, no reports.
+2. **`HOR_CHECK` compiled out in release** — it expanded to `((void)(expr))`
+   under `NDEBUG`, disabling every engine-integrity guard in the default
+   RelWithDebInfo build. `HOR_CHECK` is now unconditional (`assertFail` +
+   abort) and only `HOR_ASSERT` is compiled out. Verified with a `-DNDEBUG`
+   program: assert skipped, check aborted.
+3. **`destroy()` froze children** — children stayed parented to the tombstone,
+   and `updateWorldMatrices()` never starts a walk there, so their world
+   matrices (and collider bounds) were stuck forever. Children are now
+   re-homed on the destroyed entity's parent before its child list is cleared.
+4. **Accumulator carried permanent debt** — the 8-step cap limited simulation
+   but left the rest in `leftover_` forever, turning every frame below the cap
+   into slow motion and breaking `alphaFraction()`'s `[0,1)` contract. The
+   backlog is dropped when the cap is hit.
+5. **`TRIGGER_`/`SPAWN_` ignored the level root** — triggers baked glTF
+   node-space bounds into a field consumers read as world space, so a scaled
+   and yawed level (Fox: 0.012, 165°) got volumes ~80x too large near the
+   origin; spawn facing ignored the root yaw. `TriggerVolume` now stores a
+   local box and `Scene::refreshTriggerBounds()` derives the world AABB from
+   the entity matrix (so the floor snap and patrol motion apply too), and
+   `SpawnPoint::forward` is derived from the evaluated world matrix.
+6. **`Texture::Params::srgb` was inert** — every map allocated `GL_RGBA8`, so
+   base-colour textures were lit in gamma space and then gamma-encoded again
+   by post. The loaders now select `GL_SRGB8_ALPHA8` for sRGB maps; the
+   selftest queries the texture's internal format (0x8C43).
+11. **Loop-crossing animation events were dropped** — the wrap frame skipped
+   `fireEvents()` even though it already has a wrapped-interval branch. Called
+   unconditionally now; the selftest puts an event at 0.95 s of a 1 s loop and
+   asserts it fires on the wrap step.
+12. **`Scene::view` invalidated its own iteration** — a callback that adds or
+   destroys entities could insert into / erase from (and rehash) the map being
+   walked. `view` now snapshots ids into a local vector, then looks each one
+   up; the selftest destroys the visited entity and adds another inside a
+   callback.
+13. **Unchecked glTF indices** — an index past POSITION wrote out of bounds in
+   `generateNormals`/`generateTangents`. Indices are range-checked while
+   copying; a bad primitive is skipped with a warning, a non-multiple-of-3
+   count is truncated loudly, and empty primitives are skipped before Mesh's
+   now-live preconditions.
+19. **Head-bob folded in twice** — the controller added `bobOffset` to
+   `Camera::position` and `Camera::update()` added the same offset again
+   (6 cm bounce / 8 cm sway, and specular lit from a different eye).
+   `Camera::position` is now the un-bobbed eye; `update()` folds the offset
+   exactly once. The old selftest read `position` and could not see this; it
+   now reconstructs the eye from the view matrix, and a new check asserts
+   `inverse(view)[3] == position + right*x + up*y + forward*z`.
+20. **Bob sway was world +X** — it pumped along the view axis at yaw 90°.
+   `bobOffset` is camera-local (right/up/forward) and rotated into the basis by
+   `Camera::update()`.
+
+Low:
+
+7. `Scene::attachTo` validates child/parent ids, rejects dead parents and
+   ancestor cycles (with a hop budget), rather than relying on a release-dead
+   `HOR_CHECK`.
+8. The post pass uploads `camera.nearPlane`/`farPlane` instead of hardcoded
+   0.05/200, so fog matches any camera the game configures.
+9. `Window::pollEvents` clears `resizedSinceLastFrame` **before** polling, so
+   the documented flag is observable after a resize instead of always false.
+10. `decodeBase64` uses an unsigned accumulator masked to 24 bits; the old
+    signed `int` shift overflowed (UB) every six input characters, i.e. on
+    every embedded image.
+14. Standing up from a crouch probes `overlapsAny()` at the next smoothed
+    height and stays low under a ceiling instead of growing the collider into
+    it (the resolver deliberately ignores boxes the body is already inside).
+15. A mesh without a material is skipped in `buildQueue` with a one-shot
+    warning, so the shadow pass and main pass agree (it used to cast an
+    invisible object's shadow).
+16. `tuneFlashlight()` now applies after the component gather; it used to be
+    overwritten by the hardcoded reset at the top of every `render()`.
+17. The texture cache key includes the sRGB flag and keys on the image, so one
+    image used as both albedo and data is decoded correctly in each slot.
+18. `Input::released()` honours the same ImGui keyboard gate as `held()` and
+    `pressed()`, so a release while typing in the overlay is not an edge.
+21. The flashlight is an explicit entity (`ForwardRenderer::setFlashlight`,
+    called by gameplay) instead of whichever `SpotLight` the unordered_map
+    visited last; other spot lights no longer steal the shadow map/cone.
+22. A failed shader reload no longer commits the new mtimes: it retries after
+    500 ms (250 ms while a stage is unreadable) until the source compiles.
+    Verified by breaking `post.frag`, fixing it while keeping the broken
+    mtime, and observing `shader reloaded [post]` after three throttled
+    failures.
+23. Sub-step integration raises the pass cap to 64 and clamps speed to the
+    per-pass distance budget, so the 8 cm guarantee holds on long falls
+    instead of being exceeded after ~2.3 s (and `substeps <= 8` remains true
+    for ordinary movement).
+24. A marker node disabled by `LevelOptions` keeps a transform-only holder
+    entity, so its children are no longer placed as if the marker sat at the
+    parent's origin.
+25. A `TRIGGER_` node with no geometry warns and creates no component (it used
+    to become a zero-size volume at the world origin).
+
 ## Known issues / TODO
 
 - Point lights do not cast shadows (only the flashlight).
 - AABB collision has no slopes or moving platforms; the step-offset is flat
   and only applies while grounded. Sub-stepping caps movement at 8 cm per
-  collision pass (8 passes max per fixed step).
+  collision pass (64 passes max per fixed step; faster motion is clamped to
+  that per-step budget).
 - Collision resolution only blocks *entering* a face; a body spawned deeply
   inside geometry is not depenetrated (would need a push-to-nearest-face pass).
 - `--selftest` needs a display because Application owns the window; a truly
@@ -642,8 +752,10 @@ transform; nothing about the skinning changes.
   Switching to another clip afterwards (e.g. Fox `Run`) can dip below the slab
   again, because placement is not re-run per clip. Re-snap from `--debug-skin`
   numbers if a shorter/looser clip is added.
-- Trigger volumes are static AABBs computed at setup; a trigger attached to a
-  moving node (or a moving model) does not follow it.
+- Trigger volumes store a local box and have their world AABB refreshed from
+  the entity's world matrix every frame, so they follow root/patrol motion.
+  A trigger attached to a node that is only *animated* (skin joints, not the
+  entity transform) still does not follow the pose.
 - The mouse warp guard drops any single cursor event over 500 px. A genuine
   flick that large in one poll is not distinguishable from a warp; the event is
   dropped and counted (`Input::warpEvents`) rather than applied.

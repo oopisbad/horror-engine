@@ -25,9 +25,12 @@ public:
 
     glm::vec3 position{0.0f};
 
-    // Head-bob contribution folded in by the controller each frame.
-    glm::vec3 bobOffset{0.0f}; // world-space eye offset along local up/right
-    float bobRoll = 0.0f;      // radians of roll around forward axis
+    // Head-bob contribution published by the controller each frame and folded
+    // into the view by update(), exactly once. The offset is camera-local:
+    // x = right, y = up, z = forward. position stays the un-bobbed eye so
+    // gameplay (flashlight, self-tests, specular) can rely on it.
+    glm::vec3 bobOffset{0.0f};
+    float bobRoll = 0.0f; // radians of roll around forward axis
 
     void setPitchClamp(float minDeg, float maxDeg)
     {

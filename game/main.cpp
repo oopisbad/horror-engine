@@ -1,3 +1,4 @@
+#include "anim/AnimationSystem.hpp"
 #include "anim/Animator.hpp"
 #include "anim/SkinDebug.hpp"
 #include "asset/GltfAsset.hpp"
@@ -7,10 +8,12 @@
 #include "debug/FlightRecorder.hpp"
 #include "render/Material.hpp"
 #include "render/Mesh.hpp"
+#include "render/Texture.hpp"
 #include "scene/CharacterController.hpp"
 #include "scene/Components.hpp"
 #include "scene/Scene.hpp"
 
+#include <glm/gtc/matrix_inverse.hpp>
 #include <glm/gtc/quaternion.hpp>
 
 #include <algorithm>
@@ -134,10 +137,12 @@ void buildTestScene(Application &app)
         trigger.tag = "red-ball";
         // Bigger than the ball so *touching* it counts (the player stops with
         // their body box against the face, where a strict AABB test would not
-        // overlap), and taller so standing on top still counts.
+        // overlap), and taller so standing on top still counts. Authored in
+        // the ball's local space (the entity sits at c); refreshTriggerBounds()
+        // turns it into the world box.
         const glm::vec3 reach = half + glm::vec3(0.30f, 0.0f, 0.30f);
-        trigger.worldMin = c - reach;
-        trigger.worldMax = c + reach + glm::vec3(0.0f, 0.60f, 0.0f);
+        trigger.localCenter = glm::vec3(0.0f, 0.30f, 0.0f);
+        trigger.localHalfExtents = glm::vec3(reach.x, reach.y + 0.30f, reach.z);
         scene.add(e, std::move(trigger));
     }
 
@@ -582,6 +587,7 @@ int runSelfTest(Application &app, EntityId player, float dt, EntityId flashlight
     scene.add(thinWall, AABBCollider{ glm::vec3(0.0f), glm::vec3(2.0f, 1.0f, 0.03f), {}, {}, true });
     scene.updateWorldMatrices();
     scene.refreshColliderBounds();
+    scene.refreshTriggerBounds();
 
     const glm::vec3 padSpawn{ 100.0f, 0.0f, 100.0f };
     constexpr int kSteps = 60; // one second at the fixed step
@@ -827,13 +833,21 @@ int runSelfTest(Application &app, EntityId player, float dt, EntityId flashlight
 
         float maxExtra = 0.0f;
         float atLanding = 0.0f;
-        float prevCamY = cam.position.y;
+        // Measure the *rendered* eye: Camera::position is the unbobbed eye and
+        // Camera::update() folds bobOffset in once. The old test read
+        // Camera::position, i.e. only half of the double-folded eye, so it
+        // could not see the "bob applied twice" defect.
+        const auto eyePosition = [&]() {
+            return cam.position + cam.right() * cam.bobOffset.x
+                + cam.up() * cam.bobOffset.y + cam.forward() * cam.bobOffset.z;
+        };
+        float prevCamY = eyePosition().y;
         float prevFeetY = scene.transform(player).position.y;
         bool airborne = true;
         for (int i = 0; i < 90; ++i) {
             h.step();
             const CharacterController *cc = scene.find<CharacterController>(player);
-            const float camY = cam.position.y;
+            const float camY = eyePosition().y;
             const float feetY = scene.transform(player).position.y;
             const float extra = std::abs((camY - prevCamY) - (feetY - prevFeetY));
             maxExtra = std::max(maxExtra, extra);
@@ -849,6 +863,29 @@ int runSelfTest(Application &app, EntityId player, float dt, EntityId flashlight
                << atLanding * 1000.0f << " mm";
         report("landing bob", maxExtra < 0.010f && atLanding < 0.010f, detail.str());
         h.held.clear();
+    }
+
+    // Bob ownership: Camera::position must stay the unbobbed eye (feet + eye
+    // height) and Camera::update() must add bobOffset to the view exactly once.
+    // Reconstruct the eye from the view matrix after a steady walk; a double
+    // add (the old controller + camera fold) is off by up to 3 cm vertically
+    // and 4 cm laterally, far past the 1 mm tolerance here.
+    {
+        resetCharacter(app, player, { 0.0f, kFloorTopY, 1.8f });
+        h.held = { GLFW_KEY_W };
+        for (int i = 0; i < 40; ++i)
+            h.step();
+        h.held.clear();
+        cam.update(16.0f / 9.0f);
+        const glm::vec3 viewEye = glm::vec3(glm::inverse(cam.view())[3]);
+        const glm::vec3 expected = cam.position + cam.right() * cam.bobOffset.x
+            + cam.up() * cam.bobOffset.y + cam.forward() * cam.bobOffset.z;
+        const float error = glm::length(viewEye - expected);
+        std::ostringstream detail;
+        detail << "view-eye error=" << error * 1000.0f << " mm bob=("
+               << cam.bobOffset.x << "," << cam.bobOffset.y << ")";
+        report("bob applied once",
+            error < 0.001f && glm::length(cam.bobOffset) > 1e-3f, detail.str());
     }
 
     // Trigger: the red ball used to be inert (no collider, no trigger), so
@@ -1129,6 +1166,210 @@ int runSelfTest(Application &app, EntityId player, float dt, EntityId flashlight
     reportModelSkin("CesiumMan skin", cesiumMan);
     reportModelSkin("Fox skin", fox);
 
+    // Base-colour maps must be stored in an sRGB internal format so the sampler
+    // decodes them to linear before lighting. The old loader passed srgb=true
+    // but always allocated GL_RGBA8, so textured surfaces were lit in gamma
+    // space (too bright/desaturated) and then gamma-encoded again by post.
+    {
+        const Material *material = (!cesiumMan.model->materials().empty())
+            ? cesiumMan.model->materials().front().get()
+            : nullptr;
+        GLint internalFormat = 0;
+        if (material && material->baseColorTex)
+            glGetTextureLevelParameteriv(material->baseColorTex->handle(), 0,
+                GL_TEXTURE_INTERNAL_FORMAT, &internalFormat);
+        std::ostringstream detail;
+        detail << "base-color internal format=0x" << std::hex << internalFormat
+               << " (want 0x" << GL_SRGB8_ALPHA8 << ")" << std::dec;
+        report("srgb base color", internalFormat == GL_SRGB8_ALPHA8, detail.str());
+    }
+
+    // Crouch headroom: standing up under a low ceiling must NOT grow the
+    // collider into it. The old code lerped straight to standing height, and
+    // the collision resolver ignores boxes the body is already inside, so
+    // nothing pushed it back and the head clipped through the ceiling.
+    {
+        EntityId ceiling = scene.create("selftest-ceiling");
+        scene.transform(ceiling).position = { 100.0f, 1.25f, 98.0f };
+        scene.add(ceiling, AABBCollider{ glm::vec3(0.0f), glm::vec3(2.0f, 0.05f, 1.0f),
+            {}, {}, true });
+        scene.updateWorldMatrices();
+        scene.refreshColliderBounds();
+
+        resetCharacter(app, player, padSpawn);
+        h.held = { GLFW_KEY_LEFT_CONTROL, GLFW_KEY_W };
+        for (int i = 0; i < 110; ++i) // crouch-walk to z ~= 97.8, under the slab
+            h.step();
+        h.held.clear();
+        const glm::vec3 under = scene.transform(player).position;
+        for (int i = 0; i < 80; ++i) // try to stand: must stay low
+            h.step();
+        const CharacterController *cc = scene.find<CharacterController>(player);
+        const float underHeight = cc ? cc->currentHeight : 0.0f;
+
+        h.held = { GLFW_KEY_S }; // back out from under the slab
+        for (int i = 0; i < 80; ++i)
+            h.step();
+        h.held.clear();
+        for (int i = 0; i < 80; ++i)
+            h.step();
+        cc = scene.find<CharacterController>(player);
+        const float freeHeight = cc ? cc->currentHeight : 0.0f;
+        std::ostringstream detail;
+        detail << "under z=" << under.z << " height=" << underHeight
+               << " after clearing=" << freeHeight;
+        report("crouch headroom",
+            under.z < 99.0f && under.z > 97.0f && underHeight < 1.25f
+                && freeHeight > 1.70f,
+            detail.str());
+        resetCharacter(app, player, padSpawn);
+        scene.destroy(ceiling);
+    }
+
+    // Hierarchy: destroying a parent must not freeze its children. They used
+    // to stay parented to the tombstone, so updateWorldMatrices() never
+    // visited them again and later transform edits had no effect.
+    {
+        EntityId parent = scene.create("selftest-destroy-parent");
+        scene.transform(parent).position = { 200.0f, 0.0f, 200.0f };
+        EntityId child = scene.create("selftest-destroy-child", parent);
+        scene.transform(child).position = { 1.0f, 0.0f, 0.0f };
+        scene.updateWorldMatrices();
+        const glm::vec3 before = glm::vec3(scene.worldMatrix(child)[3]);
+        scene.destroy(parent);
+        scene.transform(child).position = { 2.0f, 0.0f, 0.0f };
+        scene.updateWorldMatrices();
+        const glm::vec3 after = glm::vec3(scene.worldMatrix(child)[3]);
+        std::ostringstream detail;
+        detail << "before=(" << before.x << "," << before.z << ") after=("
+               << after.x << "," << after.z << ") parent="
+               << scene.transform(child).parent;
+        report("destroy reparents",
+            scene.transform(child).parent == kInvalidEntity
+                && std::abs(before.x - 201.0f) < 1e-4f
+                && std::abs(after.x - 2.0f) < 1e-4f,
+            detail.str());
+        scene.destroy(child);
+    }
+
+    // view(): a callback that destroys the element being visited (and adds a
+    // new one) must be safe. The id snapshot means the new component is not
+    // visited this pass and the destroyed one is skipped.
+    {
+        EntityId victim = scene.create("selftest-view-victim");
+        scene.add(victim, EntityExtras{});
+        size_t extrasBefore = 0;
+        scene.view<EntityExtras>([&](EntityId, EntityExtras &) { ++extrasBefore; });
+        size_t visited = 0;
+        EntityId added = kInvalidEntity;
+        scene.view<EntityExtras>([&](EntityId id, EntityExtras &) {
+            ++visited;
+            if (id == victim) {
+                EntityId fresh = scene.create("selftest-view-added");
+                scene.add(fresh, EntityExtras{});
+                added = fresh;
+                scene.destroy(victim);
+            }
+        });
+        std::ostringstream detail;
+        detail << "visited=" << visited << " victimAlive=" << scene.valid(victim)
+               << " addedAlive=" << scene.valid(added);
+        report("view mutation",
+            visited == extrasBefore && !scene.valid(victim) && scene.valid(added),
+            detail.str());
+        scene.destroy(added);
+    }
+
+    // Fixed-step accumulator: a capped frame must drop its unsimulated backlog
+    // instead of carrying it forever (which turned every frame below the cap
+    // into permanent slow motion and broke alphaFraction()'s [0,1) contract).
+    {
+        FixedStepAccumulator acc(1.0f / 60.0f);
+        int total = 0;
+        for (int i = 0; i < 4; ++i)
+            total += acc.stepsToRun(0.25f);
+        const float alpha = acc.alphaFraction();
+        std::ostringstream detail;
+        detail << "steps=" << total << " alpha=" << alpha;
+        report("timestep backlog", total == 32 && alpha >= 0.0f && alpha < 1.0f,
+            detail.str());
+    }
+
+    // Animation events across the loop point: an event whose only occurrence
+    // is in the wrapped interval (after the last frame's time, before the
+    // duration) used to be dropped because update() skipped fireEvents() on
+    // exactly the wrap frame. 0.95 s is only reachable on the 0.9 -> 0.0 step.
+    {
+        auto skeleton = std::make_shared<Skeleton>();
+        skeleton->nodes.resize(1);
+        skeleton->joints = { 0 };
+        skeleton->jointParents = { -1 };
+        skeleton->inverseBind = { glm::mat4(1.0f) };
+
+        auto clip = std::make_shared<AnimationClip>();
+        clip->name = "selftest-loop-events";
+        clip->duration = 1.0f;
+        clip->events.push_back({ 0.05f, "near-start" });
+        clip->events.push_back({ 0.95f, "near-end" });
+
+        auto clips = std::make_shared<std::vector<std::shared_ptr<const AnimationClip>>>();
+        clips->push_back(clip);
+
+        EntityId entity = scene.create("selftest-anim-events");
+        Animator anim;
+        anim.skeleton = skeleton;
+        anim.clips = clips;
+        anim.currentClip = 0;
+        anim.currentTime = 0.0f;
+        anim.currentLooping = true;
+        int nearStart = 0, nearEnd = 0;
+        anim.onEvent = [&](const AnimationEvent &ev) {
+            if (ev.name == "near-start")
+                ++nearStart;
+            else if (ev.name == "near-end")
+                ++nearEnd;
+        };
+        scene.add(entity, anim);
+
+        // 12 x 0.1 s = one full loop plus a bit: the 0.95 event can only fire
+        // on the wrap step, and 0.05 fires once per loop.
+        for (int i = 0; i < 12; ++i)
+            AnimationSystem::update(scene, 0.1f);
+        std::ostringstream detail;
+        detail << "near-start=" << nearStart << " near-end=" << nearEnd;
+        report("animation loop events", nearStart == 2 && nearEnd == 1, detail.str());
+        scene.destroy(entity);
+    }
+
+    // Trigger bounds: the local box must follow the entity's world matrix, so
+    // a scaled/translated/yawed level root places the volume correctly (it
+    // used to bake glTF node-space bounds into a world-space field).
+    {
+        EntityId root = scene.create("selftest-trigger-root");
+        scene.transform(root).position = { 300.0f, 0.0f, 300.0f };
+        scene.transform(root).scale = glm::vec3(2.0f);
+        EntityId triggerEntity = scene.create("selftest-trigger", root);
+        TriggerVolume trigger;
+        trigger.tag = "selftest";
+        trigger.localCenter = glm::vec3(0.0f, 1.0f, 0.0f);
+        trigger.localHalfExtents = glm::vec3(0.5f);
+        scene.add(triggerEntity, trigger);
+        scene.updateWorldMatrices();
+        scene.refreshTriggerBounds();
+        const TriggerVolume *tv = scene.find<TriggerVolume>(triggerEntity);
+        const glm::vec3 mn = tv ? tv->worldMin : glm::vec3(0.0f);
+        const glm::vec3 mx = tv ? tv->worldMax : glm::vec3(0.0f);
+        std::ostringstream detail;
+        detail << "world x[" << mn.x << "," << mx.x << "] y[" << mn.y << ","
+               << mx.y << "]";
+        report("trigger bounds",
+            std::abs(mn.x - 299.0f) < 1e-4f && std::abs(mx.x - 301.0f) < 1e-4f
+                && std::abs(mn.y - 1.0f) < 1e-4f && std::abs(mx.y - 3.0f) < 1e-4f,
+            detail.str());
+        scene.destroy(root);
+        scene.destroy(triggerEntity);
+    }
+
     scene.destroy(ledge);
     scene.destroy(thinWall);
     scene.destroy(pad);
@@ -1136,6 +1377,7 @@ int runSelfTest(Application &app, EntityId player, float dt, EntityId flashlight
     resetCharacter(app, player, { 0.0f, kFloorTopY, 1.8f });
     scene.updateWorldMatrices();
     scene.refreshColliderBounds();
+    scene.refreshTriggerBounds();
 
     HOR_LOG_INFO("[selftest] {} of {} checks passed", checked - failed, checked);
     return failed;
@@ -1260,6 +1502,10 @@ int main(int argc, char **argv)
                 flashlight = static_cast<EntityId>(i);
         }
     }
+    // The renderer's flashlight slot is explicit: with level-imported spot
+    // lights in the scene, "whichever SpotLight the store visits last" could
+    // hand the shadow map and cone to a fixed fixture.
+    app.renderer().setFlashlight(flashlight);
     if (debugSkin) {
         // Data first: measure the two paths (skinned vertices from the UBO
         // matrices vs. the joint positions the skeleton overlay draws) across
@@ -1281,6 +1527,7 @@ int main(int argc, char **argv)
     // need world bounds by then, which Application only refreshes at loop start.
     app.scene().updateWorldMatrices();
     app.scene().refreshColliderBounds();
+    app.scene().refreshTriggerBounds();
     if (selftest) {
         const int failures = runSelfTest(app, player, cfg.fixedStepSeconds, flashlight,
             cesiumMan, fox);

@@ -290,8 +290,11 @@ void AnimationSystem::update(Scene &scene, float deltaSeconds)
         }
         anim.currentTime = newTime;
 
-        if (!anim.currentLooping || newTime >= oldTime)
-            fireEvents(*current, oldTime, newTime, anim.currentLooping, anim.onEvent);
+        // Call unconditionally: fireEvents already distinguishes a monotonic
+        // advance from a loop wrap (to < from). The old guard skipped the call
+        // exactly on the wrap frame, dropping every event in the wrapped
+        // interval -- an event at the end of a clip never fired at all.
+        fireEvents(*current, oldTime, newTime, anim.currentLooping, anim.onEvent);
 
         // Fade bookkeeping has to happen before the pose is sampled (the
         // blend weight is part of the sample).

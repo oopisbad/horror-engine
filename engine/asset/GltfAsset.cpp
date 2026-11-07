@@ -296,14 +296,18 @@ bool decodeBase64(const std::string &in, std::vector<uint8_t> &out)
 
     out.clear();
     out.reserve(in.size() * 3 / 4);
-    int bits = 0, accumulated = 0;
+    // Unsigned accumulator masked to the 24 bits that can still be read back.
+    // The old signed `int` was shifted by 6 on every input character and
+    // overflowed after six, i.e. undefined behaviour on every embedded image
+    // (a data-URI texture runs it for ~1.3 M characters).
+    uint32_t bits = 0, accumulated = 0;
     for (unsigned char c : in) {
         if (c == '=')
             break;
         const int v = values[c];
         if (v < 0)
             continue;
-        accumulated = (accumulated << 6) | v;
+        accumulated = ((accumulated << 6) | static_cast<uint32_t>(v)) & 0xFFFFFFu;
         bits += 6;
         if (bits >= 8) {
             bits -= 8;
@@ -456,20 +460,25 @@ void GltfModel::load()
     }
 
     // ---- materials + textures ---------------------------------------------
-    // Deduplicate textures: several materials commonly share one image.
-    std::unordered_map<const cgltf_texture *, std::shared_ptr<Texture>> textureCache;
+    // Deduplicate textures: several materials commonly share one image. The
+    // key includes the sRGB flag: the same image is legal both as a base-colour
+    // map (decode to linear) and as a normal/metallic-roughness map (raw data),
+    // and keying on the texture alone made the first use decide for every other
+    // user of the image.
+    std::map<std::pair<const cgltf_image *, bool>, std::shared_ptr<Texture>> textureCache;
 
     auto loadTexture = [&](const cgltf_texture *tex, bool srgb) -> std::shared_ptr<Texture> {
         if (!tex || !tex->image)
             return nullptr;
-        auto it = textureCache.find(tex);
+        const cgltf_image *image = tex->image;
+        const auto key = std::make_pair(image, srgb);
+        auto it = textureCache.find(key);
         if (it != textureCache.end())
             return it->second;
 
         Texture::Params params;
         params.srgb = srgb;
         std::shared_ptr<Texture> texture;
-        const cgltf_image *image = tex->image;
         if (image->buffer_view) {
             const void *bytes = cgltf_buffer_view_data(image->buffer_view);
             texture = std::make_shared<Texture>(
@@ -491,7 +500,7 @@ void GltfModel::load()
         if (!texture)
             return nullptr;
         textures_.push_back(texture);
-        textureCache[tex] = texture;
+        textureCache[key] = texture;
         return texture;
     };
 
@@ -616,18 +625,49 @@ void GltfModel::load()
                 }
             }
 
-            // Indices: absent means sequential.
+            // Indices: absent means sequential. Values must name a vertex in
+            // POSITION: the triangle generators below use them as subscripts
+            // (`verts[indices[i]]`), so an out-of-range index from a truncated
+            // or hand-edited asset corrupted the heap during load. Validate
+            // while copying and drop the primitive instead.
             if (prim.indices) {
-                geometry.indices.resize(prim.indices->count);
-                for (cgltf_size k = 0; k < prim.indices->count; ++k) {
+                cgltf_size indexCount = prim.indices->count;
+                if (indexCount % 3 != 0) {
+                    HOR_LOG_WARN(
+                        "glTF mesh '{}' primitive {}: {} indices is not a multiple of 3; "
+                        "dropping the trailing partial triangle",
+                        mesh.name, pi, indexCount);
+                    indexCount -= indexCount % 3;
+                }
+                geometry.indices.resize(indexCount);
+                bool badIndex = false;
+                for (cgltf_size k = 0; k < indexCount; ++k) {
                     cgltf_uint index = 0;
                     cgltf_accessor_read_uint(prim.indices, k, &index, 1);
+                    if (index >= pos->count) {
+                        HOR_LOG_WARN(
+                            "glTF mesh '{}' primitive {}: index {} >= {} vertices; "
+                            "skipping the primitive",
+                            mesh.name, pi, index, pos->count);
+                        badIndex = true;
+                        break;
+                    }
                     geometry.indices[k] = index;
                 }
+                if (badIndex)
+                    continue;
             } else {
                 geometry.indices.resize(pos->count);
                 for (cgltf_size k = 0; k < pos->count; ++k)
                     geometry.indices[k] = static_cast<uint32_t>(k);
+            }
+
+            // An empty primitive would trip Mesh's non-empty preconditions (now
+            // live in release); skip it with a diagnosis instead.
+            if (geometry.vertices.empty() || geometry.indices.empty()) {
+                HOR_LOG_WARN("glTF mesh '{}' primitive {} has no geometry; skipped",
+                    mesh.name, pi);
+                continue;
             }
 
             if (!nrm)

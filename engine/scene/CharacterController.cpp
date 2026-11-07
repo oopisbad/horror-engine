@@ -27,8 +27,13 @@ constexpr float kStepHeight = 0.35f;
 // this, so a fast fall/run can never cross a collider between two overlap
 // tests. 8 cm is above the fixed-step walk stride (4 cm) and keeps the usual
 // step to a single pass, but bounds sprint (7.7 cm) and high-speed falls.
+//
+// The pass count used to be capped at 8 while the distance was not, so a fall
+// longer than 0.64 m per step (about 2.3 s of falling) exceeded the bound the
+// comment promises. 64 passes covers ~307 m/s at 60 Hz; beyond that the
+// velocity itself is clamped below, so the invariant holds for every input.
 constexpr float kMaxSubStep = 0.08f;
-constexpr int kMaxSubSteps = 8;
+constexpr int kMaxSubSteps = 64;
 constexpr float kBobFrequency = 9.5f;  // rad/s at full walk speed
 constexpr float kBobLateral = 0.04f;   // meters of sideways sway
 constexpr float kBobVertical = 0.03f;  // meters of vertical bounce
@@ -267,6 +272,16 @@ void CharacterSystem::step(Scene &scene, EntityId entity, const Hooks &hooks, fl
     // The whole move is split so no collision pass advances the body further
     // than kMaxSubStep. Worth it for fast falls and for authored colliders
     // thinner than one fixed-step stride; normal walking still runs one pass.
+    //
+    // Keep the bound true for *all* speeds: if the distance needs more passes
+    // than the budget, clamp the speed (a terminal velocity) instead of letting
+    // a pass exceed the 8 cm covered by the overlap tests.
+    const float maxTravel = kMaxSubStep * static_cast<float>(kMaxSubSteps);
+    if (dt > 0.0f) {
+        const float speed = glm::length(cc->velocity);
+        if (speed * dt > maxTravel)
+            cc->velocity *= maxTravel / (speed * dt);
+    }
     const float travel = glm::length(cc->velocity) * dt;
     const int substeps = std::clamp(
         static_cast<int>(std::ceil(travel / kMaxSubStep)), 1, kMaxSubSteps);
@@ -318,7 +333,22 @@ void CharacterSystem::step(Scene &scene, EntityId entity, const Hooks &hooks, fl
 
     // ---- Crouch height smoothing -----------------------------------------
     cc->crouching = wantCrouch;
-    cc->currentHeight = glm::mix(cc->currentHeight, targetHeight, std::min(dt * 10.0f, 1.0f));
+    // Growing back to standing height needs headroom. The old code lerped the
+    // collider straight into a ceiling: collideAxis() deliberately ignores
+    // colliders the body was already inside, so nothing pushed it back down and
+    // the head clipped through solid geometry. Probe at the *next smoothed*
+    // size every step; stay low while it overlaps anything (overlapsAny()
+    // skips non-solid trigger geometry).
+    const float nextHeight = glm::mix(cc->currentHeight, targetHeight,
+        std::min(dt * 10.0f, 1.0f));
+    if (nextHeight > cc->currentHeight) {
+        const float saved = cc->currentHeight;
+        cc->currentHeight = nextHeight;
+        if (overlapsAny())
+            cc->currentHeight = saved;
+    } else {
+        cc->currentHeight = nextHeight;
+    }
 
     // ---- Head-bob ----------------------------------------------------------
     // Only while walking on ground; air/crouch damps it for readability.
@@ -359,11 +389,15 @@ void CharacterSystem::step(Scene &scene, EntityId entity, const Hooks &hooks, fl
     const float eyeHeight = cc->eyeHeight
         * (cc->currentHeight / (cc->height > 1e-3f ? cc->height : 1.0f));
 
-    // Camera eye = feet + eye height + bob (bob in local axis space here;
-    // camera folds in roll itself -- see Camera::update).
+    // Camera eye = feet + eye height. The head-bob offset is published but NOT
+    // added here: Camera::update() folds bobOffset (in camera-local axes) into
+    // the view exactly once. Adding it here *and* passing it on doubled the
+    // rendered bob (6 cm bounce / 8 cm sway instead of 3/4 cm), and made
+    // Camera::position disagree with the eye the view actually used (specular
+    // highlights were lit from a different point than the geometry).
     noteCameraWriter("CharacterSystem");
     notePlayerWriter("CharacterSystem");
-    hooks.camera->position = xf.position + glm::vec3(0.0f, eyeHeight, 0.0f) + cc->bobOffset;
+    hooks.camera->position = xf.position + glm::vec3(0.0f, eyeHeight, 0.0f);
     hooks.camera->bobOffset = cc->bobOffset;
     hooks.camera->bobRoll = cc->bobRoll;
 

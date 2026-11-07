@@ -24,10 +24,15 @@ Texture::Texture(const std::string &path, const Params &params)
         srgb_ = false;
         return;
     }
-    *this = Texture(GL_RGBA8, static_cast<uint32_t>(w), static_cast<uint32_t>(h), 1,
+    // Color maps must be decoded to linear by the sampler. Picking the sRGB
+    // internal format makes the hardware do it for free; the old code always
+    // allocated GL_RGBA8 and only recorded the flag, so base-colour maps were
+    // treated as linear (too bright/desaturated relative to factors) while the
+    // post pass gamma-encoded the result a second time.
+    const GLenum internal = params.srgb ? GL_SRGB8_ALPHA8 : GL_RGBA8;
+    *this = Texture(internal, static_cast<uint32_t>(w), static_cast<uint32_t>(h), 1,
         GL_RGBA, GL_UNSIGNED_BYTE, pixels, params);
     stbi_image_free(pixels);
-    srgb_ = params.srgb;
 }
 
 Texture::Texture(const uint8_t *encoded, size_t size, const Params &params)
@@ -53,10 +58,10 @@ Texture::Texture(const uint8_t *encoded, size_t size, const Params &params)
         srgb_ = false;
         return;
     }
-    *this = Texture(GL_RGBA8, static_cast<uint32_t>(w), static_cast<uint32_t>(h), 1,
+    const GLenum internal = params.srgb ? GL_SRGB8_ALPHA8 : GL_RGBA8;
+    *this = Texture(internal, static_cast<uint32_t>(w), static_cast<uint32_t>(h), 1,
         GL_RGBA, GL_UNSIGNED_BYTE, pixels, params);
     stbi_image_free(pixels);
-    srgb_ = params.srgb;
 }
 
 Texture::Texture(GLenum internalFormat, uint32_t width, uint32_t height, uint32_t depth,

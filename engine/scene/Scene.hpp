@@ -69,10 +69,20 @@ public:
     template<typename T, typename Fn>
     void view(Fn &&fn)
     {
+        // Snapshot the ids before invoking any callback. A callback may add or
+        // destroy entities (which inserts into / erases from this same
+        // unordered_map); iterating the store directly would then walk an
+        // invalidated iterator -- a rehash invalidates every iterator. The
+        // vector is local so a nested view() inside a callback is safe too.
         auto &store = storesFor<T>();
-        for (auto &[id, comp] : store)
-            if (valid(id))
-                fn(id, comp);
+        std::vector<EntityId> ids;
+        ids.reserve(store.size());
+        for (auto &entry : store)
+            if (valid(entry.first))
+                ids.push_back(entry.first);
+        for (EntityId id : ids)
+            if (T *comp = find<T>(id))
+                fn(id, *comp);
     }
 
     // Mutable const-free view is intentionally omitted for now; gameplay
@@ -91,6 +101,8 @@ public:
     void updateWorldMatrices();
     // World-space AABB bounds derived from the collider's local box + transform.
     void refreshColliderBounds();
+    // Same for trigger volumes: node-local box -> world AABB per entity.
+    void refreshTriggerBounds();
 
     // Materials imported from glTF are owned by the GltfModel in the asset
     // cache; procedural ones live in the pool below.

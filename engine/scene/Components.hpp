@@ -60,12 +60,17 @@ struct SpawnPoint {
     glm::vec3 forward{0.0f, 0.0f, -1.0f}; // world-space facing (node -Z)
 };
 
-// TRIGGER_ node: AABB volume (authored from the node's mesh bounds or extras).
-// Gameplay tests the player box against it each fixed step and fires an event
-// on entry; `playerInside` / `enterCount` are runtime state so the overlay can
-// show that it actually fired.
+// TRIGGER_ node: AABB volume authored in the entity's local space (node mesh
+// bounds or extras). Scene::refreshTriggerBounds() derives worldMin/worldMax
+// from the entity's current world matrix, so the level root's placement,
+// rotation and scale, the floor snap and later root motion all apply.
+// Gameplay tests the player box against the world box each fixed step and
+// fires an event on entry; `playerInside` / `enterCount` are runtime state so
+// the overlay can show that it actually fired.
 struct TriggerVolume {
     std::string tag;
+    glm::vec3 localCenter{0.0f};
+    glm::vec3 localHalfExtents{0.0f};
     glm::vec3 worldMin{0.0f};
     glm::vec3 worldMax{0.0f};
     bool once = false;

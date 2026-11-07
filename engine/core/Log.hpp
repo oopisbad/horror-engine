@@ -57,11 +57,16 @@ namespace detail {
 } // namespace horror
 
 // HOR_ASSERT: active in debug builds only (hot paths, cheap sanity checks).
-// HOR_CHECK:  active in all builds -- use for engine-integrity conditions.
+// HOR_CHECK:  active in ALL builds -- this is the engine-integrity guard.
+//
+// HOR_CHECK must stay live in release: it is the only guard on several
+// out-of-bounds/null operations (scene ids, buffer maps, GL object handles).
+// It used to expand to ((void)(expr)) under NDEBUG, i.e. it evaluated the
+// expression and threw the result away, so the default RelWithDebInfo build
+// (which defines NDEBUG) silently disabled every check in the engine.
 #if defined(NDEBUG)
-#define HOR_ASSERT(expr) ((void)(expr))
-#define HOR_CHECK(expr)  ((void)(expr))
+#define HOR_ASSERT(expr) ((void)0)
 #else
 #define HOR_ASSERT(expr) ((expr) ? (void)0 : ::horror::detail::assertFail(__FILE__, __LINE__, #expr))
-#define HOR_CHECK(expr)  ((expr) ? (void)0 : ::horror::detail::assertFail(__FILE__, __LINE__, #expr))
 #endif
+#define HOR_CHECK(expr) ((expr) ? (void)0 : ::horror::detail::assertFail(__FILE__, __LINE__, #expr))

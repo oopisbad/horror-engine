@@ -54,6 +54,19 @@ void Scene::destroy(EntityId e)
         std::erase(siblings, e);
         transforms_[e].parent = kInvalidEntity;
     }
+    // Re-home this entity's children on its parent before clearing the list.
+    // Leaving them parented to a tombstone meant updateWorldMatrices() never
+    // visited them again (the walk only starts at parentless roots), so their
+    // world matrices froze at the destroy frame and later transform edits,
+    // collider refreshes and rendering all used stale placement.
+    for (EntityId child : transforms_[e].children) {
+        if (child >= transforms_.size())
+            continue;
+        transforms_[child].parent = p;
+        if (p != kInvalidEntity)
+            transforms_[p].children.push_back(child);
+    }
+    transforms_[e].children.clear();
     stores_.meshRenderers.erase(e);
     stores_.pointLights.erase(e);
     stores_.spotLights.erase(e);
@@ -74,7 +87,31 @@ const std::string &Scene::name(EntityId e) const
 
 void Scene::attachTo(EntityId child, EntityId parent)
 {
-    HOR_CHECK(child != parent);
+    if (child >= transforms_.size() || !valid(child)) {
+        HOR_LOG_ERROR("attachTo: invalid child id {}", child);
+        return;
+    }
+    if (parent != kInvalidEntity) {
+        if (parent >= transforms_.size() || !valid(parent)) {
+            HOR_LOG_ERROR("attachTo: invalid parent id {} for child {}", parent, child);
+            return;
+        }
+        // Reject cycles before they exist. A cycle is invisible afterwards:
+        // the cyclic node has a parent, so updateWorldMatrices() never starts
+        // a walk at it and its whole subtree silently keeps stale matrices.
+        // The hop budget also terminates on a hierarchy that is already bad.
+        EntityId p = parent;
+        for (size_t hops = 0; p != kInvalidEntity && hops <= transforms_.size(); ++hops) {
+            if (p == child) {
+                HOR_LOG_ERROR("attachTo: refusing cycle (child {} is an ancestor of parent {})",
+                    child, parent);
+                return;
+            }
+            if (p >= transforms_.size())
+                break;
+            p = transforms_[p].parent;
+        }
+    }
     EntityId oldParent = transforms_[child].parent;
     if (oldParent != kInvalidEntity)
         std::erase(transforms_[oldParent].children, child);
@@ -125,6 +162,28 @@ void Scene::refreshColliderBounds()
         }
         col.worldMin = mn;
         col.worldMax = mx;
+    });
+}
+
+void Scene::refreshTriggerBounds()
+{
+    // Same local-box-to-world-AABB transform as colliders. Trigger volumes are
+    // authored in node-local space, so the level root's placement, rotation
+    // and scale (Fox uses 0.012), the floor snap and any later root motion all
+    // reach the gameplay test instead of being baked in glTF node space.
+    view<TriggerVolume>([this](EntityId e, TriggerVolume &trigger) {
+        const glm::mat4 &world = worldMatrices_[e];
+        glm::vec3 mn(std::numeric_limits<float>::max());
+        glm::vec3 mx(std::numeric_limits<float>::lowest());
+        for (int i = 0; i < 8; ++i) {
+            const glm::vec3 local = trigger.localCenter + trigger.localHalfExtents
+                * glm::vec3((i & 1) ? 1.f : -1.f, (i & 2) ? 1.f : -1.f, (i & 4) ? 1.f : -1.f);
+            const glm::vec3 p = glm::vec3(world * glm::vec4(local, 1.0f));
+            mn = glm::min(mn, p);
+            mx = glm::max(mx, p);
+        }
+        trigger.worldMin = mn;
+        trigger.worldMax = mx;
     });
 }
 

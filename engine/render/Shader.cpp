@@ -221,27 +221,45 @@ void Shader::reflectUniforms()
 
 bool Shader::checkHotReload()
 {
-    auto vt = queryMtime(vertRef_.resolvedPath);
-    auto ft = queryMtime(fragRef_.resolvedPath);
-    bool changed = (vt != vertRef_.lastWrite) || (ft != fragRef_.lastWrite);
-    if (!changed || vertRef_.resolvedPath.empty())
+    if (vertRef_.resolvedPath.empty())
+        return false;
+    const auto vt = queryMtime(vertRef_.resolvedPath);
+    const auto ft = queryMtime(fragRef_.resolvedPath);
+    if (vt == vertRef_.lastWrite && ft == fragRef_.lastWrite)
         return false;
 
-    // Editors occasionally truncate a file mid-save; if we can't read either
-    // stage right now, skip this cycle and retry next frame.
-    std::error_code ec;
-    std::filesystem::file_time_type probe = std::filesystem::last_write_time(vertRef_.resolvedPath, ec);
-    if (ec)
+    // A failed compile must be retried -- an editor can truncate both files and
+    // write new source that fails to compile, and the fixed source usually
+    // arrives with a new mtime while the old program keeps running. Throttle
+    // attempts (not occurrences) so a permanently broken shader does not
+    // rebuild + log every frame.
+    const auto now = std::chrono::steady_clock::now();
+    if (now < retryAfter_)
         return false;
 
-    bool ok = tryLoadProgram();
+    // Skip while either stage is mid-save/unreadable. The mtimes stay
+    // uncommitted, so the next check still sees the change and retries.
+    std::error_code vertEc, fragEc;
+    const bool vertReadable = std::filesystem::exists(vertRef_.resolvedPath, vertEc) && !vertEc;
+    const bool fragReadable = std::filesystem::exists(fragRef_.resolvedPath, fragEc) && !fragEc;
+    if (!vertReadable || !fragReadable) {
+        retryAfter_ = now + std::chrono::milliseconds(250);
+        return false;
+    }
+
+    if (!tryLoadProgram()) {
+        // Do NOT advance lastWrite here: the old code recorded the failed
+        // source as reloaded, so a compile error was never retried even after
+        // the file was fixed (as long as the mtime did not change again).
+        retryAfter_ = now + std::chrono::milliseconds(500);
+        return false;
+    }
+    retryAfter_ = {};
     vertRef_.lastWrite = vt;
     fragRef_.lastWrite = ft;
-    if (ok) {
-        reflectUniforms();
-        HOR_LOG_INFO("shader reloaded [{}]", name_);
-    }
-    return ok;
+    reflectUniforms();
+    HOR_LOG_INFO("shader reloaded [{}]", name_);
+    return true;
 }
 
 void Shader::bind() const

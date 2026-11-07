@@ -258,6 +258,12 @@ bool Input::pressed(Action a) const
 
 bool Input::released(Action a) const
 {
+    // Same UI gate as held()/pressed(): while a focused ImGui field owns the
+    // keyboard, a release here is typing, not gameplay. Without this, pressing
+    // a key into the overlay then releasing it produced a release edge with no
+    // matching press.
+    if (!mouseCaptured_ && keyboardWantedByImGui)
+        return false;
     const auto &map = bindings_[(size_t)a];
     for (int key : map) {
         if (key == kUnknown)

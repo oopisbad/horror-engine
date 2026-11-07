@@ -87,10 +87,14 @@ LevelInstance LevelBuilder::instantiate(Scene &scene, std::shared_ptr<GltfModel>
 
         if ((isCollision && !options.importCollision) || (isSpawn && !options.importSpawnPoints)
             || (isTrigger && !options.importTriggers)) {
-            // Still walk children so a disabled marker doesn't orphan a
-            // subtree; children attach to the parent's entity instead.
+            // Keep the node's transform in the hierarchy even when its
+            // component is not imported: children's local TRS is relative to
+            // this node, so re-parenting them straight to the parent placed
+            // the whole subtree as if the marker sat at the parent's origin.
+            // A component-less entity costs one Transform.
+            EntityId holder = addEntity(namePrefix + node.name, parentEntity, local);
             for (int child : node.children)
-                buildNode(child, parentEntity);
+                buildNode(child, holder);
             return;
         }
 
@@ -149,35 +153,34 @@ LevelInstance LevelBuilder::instantiate(Scene &scene, std::shared_ptr<GltfModel>
                 HOR_LOG_WARN("COL_ node '{}' has no mesh; no collider created", node.name);
             }
         } else if (isSpawn) {
+            // Facing is a world direction; it needs the evaluated hierarchy
+            // (level root yaw included), so it is filled in after all nodes
+            // exist -- see the loop at the end of instantiate().
             SpawnPoint spawn;
             spawn.tag = node.name.substr(6); // strip "SPAWN_"
-            const glm::mat4 world = m.restNodeWorldMatrix(nodeIndex);
-            const glm::vec3 forward = -glm::vec3(world[2]);
-            const float len = glm::length(forward);
-            spawn.forward = len > 1e-6f ? forward / len : glm::vec3(0.0f, 0.0f, -1.0f);
             scene.add(entity, spawn);
             result.spawnPoints.push_back(entity);
         } else if (isTrigger) {
-            TriggerVolume trigger;
-            trigger.tag = node.name.substr(8); // strip "TRIGGER_"
-            if (haveBounds) {
-                const glm::mat4 world = m.restNodeWorldMatrix(nodeIndex);
-                glm::vec3 mn(std::numeric_limits<float>::max());
-                glm::vec3 mx(-std::numeric_limits<float>::max());
-                for (int corner = 0; corner < 8; ++corner) {
-                    const glm::vec3 local(
-                        (corner & 1) ? localMax.x : localMin.x,
-                        (corner & 2) ? localMax.y : localMin.y,
-                        (corner & 4) ? localMax.z : localMin.z);
-                    const glm::vec3 p = glm::vec3(world * glm::vec4(local, 1.0f));
-                    mn = glm::min(mn, p);
-                    mx = glm::max(mx, p);
-                }
-                trigger.worldMin = mn;
-                trigger.worldMax = mx;
+            if (!haveBounds) {
+                // A trigger without geometry used to be added anyway, with its
+                // world bounds defaulting to (0,0,0): a zero-size volume at the
+                // map origin that could fire on anything near it. Match COL_:
+                // warn and create nothing, so the author sees why.
+                HOR_LOG_WARN("TRIGGER_ node '{}' has no mesh; no trigger created", node.name);
+            } else {
+                TriggerVolume trigger;
+                trigger.tag = node.name.substr(8); // strip "TRIGGER_"
+                // Store the node-local box only. Scene::refreshTriggerBounds()
+                // transforms it by the entity's world matrix, so the level
+                // root's position/yaw/scale, the floor snap and later root
+                // motion all apply (baking model-space numbers into a
+                // world-space field put scaled/yawed levels' triggers at the
+                // wrong place and size).
+                trigger.localCenter = (localMin + localMax) * 0.5f;
+                trigger.localHalfExtents = (localMax - localMin) * 0.5f;
+                scene.add(entity, trigger);
+                result.triggers.push_back(entity);
             }
-            scene.add(entity, trigger);
-            result.triggers.push_back(entity);
         } else if (options.importMeshes && mesh) {
             for (size_t partIndex = 0; partIndex < mesh->parts.size(); ++partIndex) {
                 const GltfMeshPart &part = mesh->parts[partIndex];
@@ -225,6 +228,20 @@ LevelInstance LevelBuilder::instantiate(Scene &scene, std::shared_ptr<GltfModel>
 
     for (int rootNode : m.roots())
         buildNode(rootNode, result.root);
+
+    // Spawn facing is the node's -Z in *world* space. Deriving it from the
+    // glTF node chain alone ignored rootTransform(): a yawed level rotated the
+    // meshes but left every spawn pointing at the unrotated model orientation.
+    scene.updateWorldMatrices();
+    for (EntityId e : result.spawnPoints) {
+        SpawnPoint *spawn = scene.find<SpawnPoint>(e);
+        if (!spawn)
+            continue;
+        const glm::vec3 forward = -glm::vec3(scene.worldMatrix(e)[2]);
+        const float len = glm::length(forward);
+        spawn->forward = len > 1e-6f ? forward / len : glm::vec3(0.0f, 0.0f, -1.0f);
+    }
+    scene.refreshTriggerBounds();
 
     HOR_LOG_INFO("level '{}': {} entities ({} mesh, {} spawn, {} trigger, {} light)",
         baseName, result.entities.size(), result.meshEntities.size(),

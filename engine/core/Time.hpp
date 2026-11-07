@@ -41,8 +41,8 @@ public:
         : step_(stepSeconds) {}
 
     // Feed last frame's delta; returns the number of fixed logic steps to run
-    // this frame. Carries leftover time forward; the clamp in FrameTimer keeps
-    // the value bounded.
+    // this frame. Carries leftover time forward, but drops the backlog when
+    // the per-frame cap is hit (see below).
     int stepsToRun(float frameDelta)
     {
         leftover_ += frameDelta;
@@ -51,6 +51,13 @@ public:
             leftover_ -= step_;
             ++steps;
         }
+        // The cap limited how much was simulated, but the unsimulated time used
+        // to stay in the accumulator forever: a machine below ~7.5 fps added
+        // debt on every frame, gameplay ran in permanent slow motion and
+        // alphaFraction() returned values far above the documented [0,1).
+        // Dropping the backlog is the standard "clamp your accumulator" rule.
+        if (steps == maxStepsPerFrame_ && leftover_ >= step_)
+            leftover_ = 0.0f;
         return steps;
     }
 

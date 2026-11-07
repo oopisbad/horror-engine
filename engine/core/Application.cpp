@@ -45,6 +45,7 @@ int Application::run()
     // boxes sitting at the origin.
     scene_.updateWorldMatrices();
     scene_.refreshColliderBounds();
+    scene_.refreshTriggerBounds();
 
     while (running_ && !window_.shouldClose()) {
         const float frameDt = frameTimer_.tickRealtime();
@@ -95,6 +96,7 @@ int Application::run()
 
         scene_.updateWorldMatrices();
         scene_.refreshColliderBounds();
+        scene_.refreshTriggerBounds();
         camera_.update(window_.aspect());
         renderer_.setWireframe(renderer_.wireframe());
         renderer_.setDebugDrawEnabled(renderer_.debugDrawEnabled());
@@ -155,20 +157,35 @@ void Application::takeScreenshot(const std::string &path)
     // (gamma in the default framebuffer may differ per driver; verified
     // visually rather than pixel-perfect).
     glFlush();
-    int32_t x = 0, y = 0, w = 0, h = 0;
-    // use viewport from the last render
     // Screenshot reads the default framebuffer. The last bound pass may have
     // left the shadow-map viewport active, so reset explicitly to the window.
     Framebuffer::bindDefault();
     glFlush();
-    w = static_cast<int32_t>(window_.frameWidth());
-    h = static_cast<int32_t>(window_.frameHeight());
-    x = 0;
-    y = 0;
-    std::vector<uint8_t> pixels(static_cast<size_t>(w) * h * 3);
-    glReadPixels(x, y, w, h, GL_RGB, GL_UNSIGNED_BYTE, pixels.data());
-    if (pixels.empty()) {
-        HOR_LOG_WARN("screenshot capture failed (zero-size buffer)");
+    const int32_t w = static_cast<int32_t>(window_.frameWidth());
+    const int32_t h = static_cast<int32_t>(window_.frameHeight());
+    if (w <= 0 || h <= 0) {
+        HOR_LOG_WARN("screenshot capture failed ({}x{} framebuffer)", w, h);
+        return;
+    }
+    // glReadPixels honours GL_PACK_ALIGNMENT (default 4): each RGB row starts
+    // on a 4-byte boundary, so a width whose 3*w is not a multiple of 4 needs
+    // up to 3 bytes of padding per row. The old buffer was exactly w*h*3, so
+    // any such width (1281, 1366, ...) wrote past the end of the vector -- heap
+    // corruption -- and the tightly-packed flip loop sheared the image. Read
+    // tightly packed instead, and size the allocation for the aligned case as
+    // a defensive margin.
+    const size_t rowBytes = static_cast<size_t>(w) * 3;
+    const size_t alignedRowBytes = (rowBytes + 3u) & ~size_t(3u);
+    std::vector<uint8_t> pixels(alignedRowBytes * static_cast<size_t>(h), 0);
+    while (glGetError() != GL_NO_ERROR) { // drain stale errors before the read
+    }
+    glPixelStorei(GL_PACK_ALIGNMENT, 1);
+    glReadPixels(0, 0, w, h, GL_RGB, GL_UNSIGNED_BYTE, pixels.data());
+    glPixelStorei(GL_PACK_ALIGNMENT, 4);
+    const GLenum readError = glGetError();
+    if (readError != GL_NO_ERROR) {
+        HOR_LOG_WARN("glReadPixels failed (0x{:x}); screenshot not written",
+            static_cast<unsigned>(readError));
         return;
     }
     // Write TGA (24-bit, uncompressed, top-down); keeps the debug helper
@@ -186,10 +203,10 @@ void Application::takeScreenshot(const std::string &path)
     header[15] = static_cast<uint8_t>((h >> 8) & 0xFF);
     header[16] = 24; // bpp
     std::fwrite(header, 1, sizeof(header), f);
-    std::vector<uint8_t> flipped(pixels.size());
+    std::vector<uint8_t> flipped(rowBytes * static_cast<size_t>(h));
     for (int row = 0; row < h; ++row)
-        std::memcpy(&flipped[static_cast<size_t>(row) * w * 3],
-            &pixels[static_cast<size_t>(h - 1 - row) * w * 3], size_t(w) * 3);
+        std::memcpy(&flipped[static_cast<size_t>(row) * rowBytes],
+            &pixels[static_cast<size_t>(h - 1 - row) * rowBytes], rowBytes);
     std::fwrite(flipped.data(), 1, flipped.size(), f);
     std::fclose(f);
     HOR_LOG_INFO("screenshot written: {}", path);

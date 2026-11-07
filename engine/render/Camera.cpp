@@ -44,11 +44,15 @@ void Camera::update(float aspect)
 {
     clampPitch();
 
-    glm::vec3 eye = position + bobOffset;
-
     glm::vec3 f = forward();
     glm::vec3 r = right();
     glm::vec3 u = up();
+
+    // bobOffset is camera-local (x = right, y = up, z = forward), not a world
+    // vector: adding it straight to the world position made the "sideways"
+    // sway pump along the view axis at yaw 90 degrees. Fold it exactly once --
+    // the character controller publishes position *without* the bob.
+    glm::vec3 eye = position + r * bobOffset.x + u * bobOffset.y + f * bobOffset.z;
 
     // Roll only bends the camera axes around forward; the view path stays a
     // plain lookAt so projection math is never affected.

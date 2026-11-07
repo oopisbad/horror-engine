@@ -116,12 +116,15 @@ void ForwardRenderer::setDebugDrawEnabled(bool on) { debugDrawEnabled_ = on; }
 
 void ForwardRenderer::tuneFlashlight(float innerDeg, float outerDeg, float range, float intensity)
 {
-    // Gameplay-side flavor (battery flicker etc.) replaces these direct calls
-    // later; the hook exists so that swap doesn't touch render code first.
-    flashlightInnerDeg_ = innerDeg;
-    flashlightOuterDeg_ = outerDeg;
-    flashlightRange_ = range;
-    flashlightIntensity_ = intensity;
+    // Stored, not applied here: render() resets the gathered flashlight state
+    // from the component every frame, so writing the live fields from this
+    // setter made the call a silent no-op. render() applies these after the
+    // gather.
+    tunedInnerDeg_ = innerDeg;
+    tunedOuterDeg_ = outerDeg;
+    tunedRange_ = range;
+    tunedIntensity_ = intensity;
+    flashlightTuned_ = true;
 }
 
 // ---- frustum ------------------------------------------------------------------
@@ -167,9 +170,17 @@ void ForwardRenderer::buildQueue(Scene &scene, const Camera &camera)
 
     auto enqueue = [&](EntityId id, const Mesh *mesh, const Material *material,
                        bool castShadow, const std::vector<glm::mat4> *bones) {
-        ++stats_.itemsSubmitted;
+        // One behaviour for both passes. The shadow pass never consulted the
+        // material, so a material-less mesh used to cast a full shadow while
+        // the main pass silently skipped it (invisible object, visible shadow).
         if (!mesh)
             return;
+        if (!material) {
+            HOR_LOG_WARN_ONCE("mesh entity '{}' has no material; skipping its draw",
+                scene.name(id));
+            return;
+        }
+        ++stats_.itemsSubmitted;
         RenderItem item;
         item.mesh = mesh;
         item.material = material;
@@ -261,36 +272,55 @@ void ForwardRenderer::render(Scene &scene, Camera &camera)
     sceneForUniforms_ = &scene;
     buildQueue(scene, camera);
 
-    // ---- flashlight light state (from the SpotLight component, if any) ----
-    flashlightInnerDeg_ = 18.0f;
-    flashlightOuterDeg_ = 24.0f;
-    flashlightRange_ = 45.0f;
-    flashlightIntensity_ = 8.0f;
-    flashlightColor_ = glm::vec3(1.0f, 0.96f, 0.88f);
-    hasFlashlightTransform_ = false;
-    scene.view<SpotLight>([&](EntityId id, const SpotLight &sl) {
-        flashlightInnerDeg_ = sl.innerConeDeg;
-        flashlightOuterDeg_ = sl.outerConeDeg;
-        flashlightRange_ = sl.range;
-        flashlightIntensity_ = sl.intensity;
-        flashlightColor_ = sl.color;
-        // World matrix: translation = light origin, -Z column = light axis
-        // (matches how the game builds the entity's rotation from the camera).
-        const glm::mat4 &world = scene.worldMatrix(id);
-        const glm::vec3 dir = -glm::vec3(world[2]);
-        const float len = glm::length(dir);
-        if (len > 1e-5f) {
-            flashlightPos_ = glm::vec3(world[3]);
-            flashlightDir_ = dir / len;
-            hasFlashlightTransform_ = true;
+    // ---- flashlight light state (explicit entity, camera fallback) ----
+    // Defaults live in locals so the per-frame gather starts clean; the old
+    // code wrote literals into the members and then let every visited SpotLight
+    // overwrite them, which (a) made tuneFlashlight() useless and (b) made the
+    // winner depend on unordered_map order when a level imported a spot light.
+    float innerDeg = 18.0f, outerDeg = 24.0f, range = 45.0f, intensity = 8.0f;
+    glm::vec3 color(1.0f, 0.96f, 0.88f);
+    glm::vec3 lightPos(0.0f);
+    glm::vec3 lightDir(0.0f, 0.0f, -1.0f);
+    bool hasTransform = false;
+    if (flashlightEntity_ != kInvalidEntity && scene.valid(flashlightEntity_)) {
+        if (const SpotLight *sl = scene.find<SpotLight>(flashlightEntity_)) {
+            innerDeg = sl->innerConeDeg;
+            outerDeg = sl->outerConeDeg;
+            range = sl->range;
+            intensity = sl->intensity;
+            color = sl->color;
+            // World matrix: translation = light origin, -Z column = light axis
+            // (matches how the game builds the entity's rotation from the camera).
+            const glm::mat4 &world = scene.worldMatrix(flashlightEntity_);
+            const glm::vec3 dir = -glm::vec3(world[2]);
+            const float len = glm::length(dir);
+            if (len > 1e-5f) {
+                lightPos = glm::vec3(world[3]);
+                lightDir = dir / len;
+                hasTransform = true;
+            }
         }
-    });
+    }
+    if (flashlightTuned_) {
+        innerDeg = tunedInnerDeg_;
+        outerDeg = tunedOuterDeg_;
+        range = tunedRange_;
+        intensity = tunedIntensity_;
+    }
+    flashlightInnerDeg_ = innerDeg;
+    flashlightOuterDeg_ = outerDeg;
+    flashlightRange_ = range;
+    flashlightIntensity_ = intensity;
+    flashlightColor_ = color;
+    flashlightPos_ = lightPos;
+    flashlightDir_ = lightDir;
+    hasFlashlightTransform_ = hasTransform;
 
     ensureOutputTarget();
     // Shadow pass renders only from the flashlight.
     shadowPass(scene, camera);
     mainPass(scene, camera);
-    postPass();
+    postPass(camera);
 }
 
 void ForwardRenderer::shadowPass(Scene &scene, const Camera &camera)
@@ -442,7 +472,7 @@ void ForwardRenderer::mainPass(Scene &scene, Camera &camera)
     glBindTextureUnit(15, 0);
 }
 
-void ForwardRenderer::postPass()
+void ForwardRenderer::postPass(const Camera &camera)
 {
     if (!sceneTarget_)
         return;
@@ -470,8 +500,11 @@ void ForwardRenderer::postPass()
     glBindTextureUnit(1, sceneTarget_->depth());
     postShader_->setUniform("uScene", 0);
     postShader_->setUniform("uDepth", 1);
-    postShader_->setUniform("uNear", 0.05f);
-    postShader_->setUniform("uFar", 200.0f);
+    // Fog reconstructs linear depth with the *camera's* planes. Hardcoded
+    // literals here silently disagreed with any game that tuned near/far (and
+    // there are the same magic numbers in post.frag).
+    postShader_->setUniform("uNear", camera.nearPlane);
+    postShader_->setUniform("uFar", camera.farPlane);
     postShader_->setUniform("uExposure", post_.exposure);
     postShader_->setUniform("uTime", timeSeconds_);
     postShader_->setUniform("uVignette", post_.vignette);

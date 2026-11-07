@@ -124,9 +124,12 @@ void Window::swapBuffers() const
 
 void Window::pollEvents() const
 {
-    glfwPollEvents();
-    // Cleared after every poll: the flag describes "the last polled batch".
+    // Clear BEFORE polling, not after: the framebuffer callback sets the flag
+    // while glfwPollEvents() runs, and anything that checks it after this
+    // returns must see the resize. Clearing afterwards made the public flag
+    // permanently false, no matter when a caller looked at it.
     const_cast<Window *>(this)->resizedSinceLastFrame = false;
+    glfwPollEvents();
 }
 
 void Window::setVsync(bool enabled)

@@ -1,7 +1,11 @@
 # Build output
 build/
+build-*/
 cmake-build-*/
 CMakeUserPresets.json
+
+# Packaged distributions
+dist/
 
 # Python (tooling/venv)
 .venv/

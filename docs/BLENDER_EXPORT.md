@@ -54,7 +54,7 @@ intended shading.
 | --- | --- |
 | `COL_` | Invisible collision geometry. The node's mesh bounds become an `AABBCollider`; nothing is rendered. |
 | `SPAWN_` | Spawn marker. Becomes a `SpawnPoint`; the suffix is the tag (`SPAWN_player`). The node's −Z is the facing direction. |
-| `TRIGGER_` | Trigger volume. The node's world-space mesh bounds become a `TriggerVolume`; the suffix is the tag. |
+| `TRIGGER_` | Trigger volume. The node's mesh bounds become a `TriggerVolume` (local box, world AABB refreshed from the hierarchy, so the level root's placement/rotation/scale applies); the suffix is the tag. |
 
 All other mesh nodes become renderable entities (one child entity per
 material primitive). Node `extras` become an `EntityExtras` key/value map

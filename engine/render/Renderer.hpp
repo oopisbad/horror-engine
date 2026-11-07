@@ -1,6 +1,7 @@
 #pragma once
 
 #include "render/Camera.hpp"
+#include "scene/Components.hpp" // EntityId / kInvalidEntity for the flashlight slot
 
 #include <glad/gl.h>
 
@@ -95,6 +96,14 @@ public:
     void setDrawBones(bool on) { drawBones_ = on; }
     bool drawBones() const { return drawBones_; }
 
+    // Which SpotLight entity is the player's flashlight. Takes precedence over
+    // choosing among the scene's spot lights: with more than one SpotLight in
+    // the scene the old gather used whichever the unordered_map visited last,
+    // so an imported level fixture could silently replace the camera light and
+    // change between runs. Unset = camera-basis fallback with default cone.
+    void setFlashlight(EntityId entity) { flashlightEntity_ = entity; }
+    EntityId flashlight() const { return flashlightEntity_; }
+
     void setAmbient(const AmbientLight &a) { ambient_ = a; }
     const AmbientLight &ambient() const { return ambient_; }
 
@@ -112,14 +121,16 @@ public:
     const RenderStats &stats() const { return stats_; }
     DebugDraw &debugDraw();
 
-    // flashlight cone widening while sprinting (gameplay flavor), etc.
+    // Gameplay-side flashlight flavor (battery flicker, cone widening while
+    // sprinting). Overrides the gathered SpotLight component values from the
+    // next frame on; call it every frame for transient effects.
     void tuneFlashlight(float innerDeg, float outerDeg, float range, float intensity);
 
 private:
     void shadowPass(Scene &scene, const Camera &camera);
     void buildQueue(Scene &scene, const Camera &camera);
     void mainPass(Scene &scene, Camera &camera);
-    void postPass();
+    void postPass(const Camera &camera);
     void drawDebugData(Scene &scene, Camera &camera);
     void setupLightingUniforms(const Shader &shader, const Camera &camera);
     void bindLitUniforms(const Shader &shader, Camera &camera);
@@ -158,13 +169,20 @@ private:
     std::unique_ptr<DebugDraw> debugDraw_;
     RenderStats stats_{};
 
-    // Flashlight state, gathered from the SpotLight component each frame
-    // (single flashlight assumption; gameplay may flicker these values).
+    // Flashlight state, gathered from the selected SpotLight component each
+    // frame (single flashlight assumption; gameplay may flicker these values).
+    EntityId flashlightEntity_ = kInvalidEntity;
     glm::vec3 flashlightColor_{1.0f, 0.96f, 0.88f};
     float flashlightIntensity_ = 8.0f;
     float flashlightInnerDeg_ = 18.0f;
     float flashlightOuterDeg_ = 24.0f;
     float flashlightRange_ = 45.0f;
+    // tuneFlashlight() overrides; applied after the component gather.
+    bool flashlightTuned_ = false;
+    float tunedInnerDeg_ = 18.0f;
+    float tunedOuterDeg_ = 24.0f;
+    float tunedRange_ = 45.0f;
+    float tunedIntensity_ = 8.0f;
     // World-space origin/direction gathered from the SpotLight entity.
     glm::vec3 flashlightPos_{0.0f};
     glm::vec3 flashlightDir_{0.0f, 0.0f, -1.0f};

@@ -4,6 +4,7 @@
 
 #include <glm/glm.hpp>
 
+#include <chrono>
 #include <cstdint>
 #include <filesystem>
 #include <string>
@@ -72,6 +73,9 @@ private:
         std::filesystem::file_time_type lastWrite{};
     };
     SourceRef vertRef_, fragRef_;
+    // After a failed reload, wait before retrying so a permanently broken
+    // edit cannot compile-and-log every frame. A successful load clears it.
+    std::chrono::steady_clock::time_point retryAfter_{};
 
     std::string name_;
     std::vector<std::string> defines_;
