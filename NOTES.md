@@ -754,6 +754,10 @@ Low:
 Tag `v0.1.0-beta` on `bug-review-notes` publishes both archives:
 `horror-engine-0.1.0-linux-x86_64.tar.gz` (1.3 MB) and
 `horror-engine-0.1.0-windows-x86_64.zip` (1.8 MB, Windows 11 / RX 580 target).
+The repository is public (https://github.com/oopisbad/horror-engine) and the
+release is marked pre-release:
+https://github.com/oopisbad/horror-engine/releases/tag/v0.1.0-beta
+Both assets were downloaded anonymously from the release and hash-matched.
 
 Verified here (CachyOS, Intel UHD 600): clean host build with `--selftest`
 35/35; ASan+UBSan self-test and a 1281x720 screenshot clean and exactly sized;

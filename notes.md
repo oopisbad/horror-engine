@@ -62,7 +62,11 @@ that hardware are still untested.
 
 Release: tag `v0.1.0-beta` attaches
 `horror-engine-0.1.0-windows-x86_64.zip` (Windows, RX 580 / Windows 11 focus)
-and `horror-engine-0.1.0-linux-x86_64.tar.gz`.
+and `horror-engine-0.1.0-linux-x86_64.tar.gz`. The repository is public at
+https://github.com/oopisbad/horror-engine and the release (marked pre-release)
+is at https://github.com/oopisbad/horror-engine/releases/tag/v0.1.0-beta;
+both archives were downloaded anonymously from that URL and their SHA-256
+hashes match the local build outputs.
 
 | # | Severity | Where | Bug |
 | - | -------- | ----- | --- |
