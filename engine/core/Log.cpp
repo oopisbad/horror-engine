@@ -3,7 +3,7 @@
 #include <cstdio>
 #include <cstdlib>
 
-#if !defined(NDEBUG)
+#if !defined(NDEBUG) && defined(__linux__)
 #include <execinfo.h>
 #endif
 

@@ -27,8 +27,8 @@ Input::Input()
     bindings_[(size_t)Action::MoveBackward] = { GLFW_KEY_S, GLFW_KEY_DOWN };
     bindings_[(size_t)Action::MoveLeft] = { GLFW_KEY_A, GLFW_KEY_LEFT };
     bindings_[(size_t)Action::MoveRight] = { GLFW_KEY_D, GLFW_KEY_RIGHT };
-    bindings_[(size_t)Action::Sprint] = { GLFW_KEY_LEFT_SHIFT };
-    bindings_[(size_t)Action::Crouch] = { GLFW_KEY_LEFT_CONTROL, GLFW_KEY_C };
+    bindings_[(size_t)Action::Sprint] = { GLFW_KEY_LEFT_SHIFT, GLFW_KEY_LEFT_CONTROL };
+    bindings_[(size_t)Action::Crouch] = { GLFW_KEY_C };
     bindings_[(size_t)Action::Jump] = { GLFW_KEY_SPACE };
     bindings_[(size_t)Action::Interact] = { GLFW_KEY_E };
     bindings_[(size_t)Action::ToggleDebugUI] = { GLFW_KEY_F1 };
@@ -74,7 +74,7 @@ void Input::keyCallback(GLFWwindow *, int key, int /*scancode*/, int action, int
     if (!self || key < 0 || key > GLFW_KEY_LAST)
         return;
     if (action == GLFW_PRESS)
-        self->keys_[key].isDown = true;
+        { if (key == GLFW_KEY_SPACE) self->jumpPending_ = true; self->keys_[key].isDown = true; }
     else if (action == GLFW_RELEASE)
         self->keys_[key].isDown = false;
 }
@@ -99,6 +99,7 @@ void Input::focusCallback(GLFWwindow *, int focused)
     if (nowFocused == self->focused_)
         return;
     self->focused_ = nowFocused;
+    if (!nowFocused) { self->jumpPending_ = false; for (auto &k : self->keys_) k = { false, false }; }
     // Both directions need a re-baseline: on the way out the pending delta
     // belongs to the free-cursor era, and on the way back the pointer may sit
     // anywhere (the WM moved/warped it while we were unfocused).
@@ -224,6 +225,7 @@ void Input::setScriptedKey(int key, bool down)
 {
     if (key < 0 || key > GLFW_KEY_LAST)
         return;
+    if (key == GLFW_KEY_SPACE && down && !keys_[key].isDown) jumpPending_ = true;
     keys_[key].isDown = down;
 }
 

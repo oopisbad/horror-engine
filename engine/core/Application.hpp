@@ -28,7 +28,7 @@ public:
         bool vsync = true;
         bool wireframe = false; // start with polygon mode LINE (--wireframe)
         float fixedStepSeconds = 1.0f / 60.0f;
-        uint32_t shadowMapSize = 1024;
+        uint32_t shadowMapSize = 2048;
     };
 
     explicit Application(Config config);

@@ -77,7 +77,7 @@ struct RenderStats {
 // change, not a rewrite.
 class ForwardRenderer {
 public:
-    explicit ForwardRenderer(uint32_t shadowMapSize = 1024);
+    explicit ForwardRenderer(uint32_t shadowMapSize = 2048);
     ~ForwardRenderer();
 
     // Full frame: shadow pass -> cull/queue -> main pass -> debug draw.

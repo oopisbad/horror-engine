@@ -51,6 +51,7 @@ add_library(imgui STATIC
     ${imgui_SOURCE_DIR}/backends/imgui_impl_opengl3.cpp
 )
 target_include_directories(imgui PUBLIC ${imgui_SOURCE_DIR} ${imgui_SOURCE_DIR}/backends)
+target_link_libraries(imgui PUBLIC glfw)
 
 # GLAD loader generated with `glad --api="gl:core=4.5"`; checked in so builds
 # don't need python/network. Regenerate only when bumping the GL version.
@@ -86,7 +87,11 @@ add_custom_target(copy_shaders ALL
     COMMAND ${CMAKE_COMMAND} -E copy_directory
             ${CMAKE_CURRENT_SOURCE_DIR}/shaders $<TARGET_FILE_DIR:game>/shaders
     COMMENT "Syncing shaders next to the executable")
-add_dependencies(game copy_shaders)
+add_custom_target(copy_assets ALL
+    COMMAND ${CMAKE_COMMAND} -E copy_directory
+            ${CMAKE_CURRENT_SOURCE_DIR}/assets $<TARGET_FILE_DIR:game>/assets
+    COMMENT "Syncing assets next to the executable")
+add_dependencies(game copy_shaders copy_assets)
 
 source_group(TREE ${CMAKE_CURRENT_SOURCE_DIR} FILES ${ENGINE_SOURCES} ${GAME_SOURCES})
 

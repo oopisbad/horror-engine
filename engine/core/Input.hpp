@@ -53,6 +53,7 @@ public:
     void update();
 
     // --- action queries -------------------------------------------------------
+    bool consumeJumpPress() { bool p = jumpPending_; jumpPending_ = false; return p; }
     bool held(Action a) const;      // down this frame
     bool pressed(Action a) const;   // this frame edge (was up last frame)
     bool released(Action a) const;  // up this frame edge
@@ -135,6 +136,7 @@ private:
     // resolve their instance through this instead of clobbering that pointer.
     inline static Input *active_ = nullptr;
 
+    bool jumpPending_ = false;
     bool mouseCaptured_ = false;
     glm::vec2 mousePos_{};           // logical window coords
     glm::vec2 mouseDelta_{};         // raw cursor movement, un-consumed

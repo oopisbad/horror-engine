@@ -408,6 +408,7 @@ int keyFromName(std::string_view name)
     if (name == "SPACE") return GLFW_KEY_SPACE;
     if (name == "SHIFT") return GLFW_KEY_LEFT_SHIFT;
     if (name == "CTRL" || name == "CONTROL") return GLFW_KEY_LEFT_CONTROL;
+    if (name == "C") return GLFW_KEY_C;
     return GLFW_KEY_UNKNOWN;
 }
 
@@ -416,7 +417,7 @@ const std::vector<int> &scriptableKeys()
 {
     static const std::vector<int> keys = {
         GLFW_KEY_W, GLFW_KEY_A, GLFW_KEY_S, GLFW_KEY_D,
-        GLFW_KEY_SPACE, GLFW_KEY_LEFT_SHIFT, GLFW_KEY_LEFT_CONTROL
+        GLFW_KEY_SPACE, GLFW_KEY_LEFT_SHIFT, GLFW_KEY_C, GLFW_KEY_LEFT_CONTROL
     };
     return keys;
 }
@@ -468,6 +469,7 @@ void resetCharacter(Application &app, EntityId player, const glm::vec3 &feet)
     if (CharacterController *cc = scene.find<CharacterController>(player)) {
         cc->velocity = glm::vec3(0.0f);
         cc->lastPush = glm::vec3(0.0f);
+        cc->jumpBuffer = cc->coyoteTime = 0.0f;
         cc->grounded = false;
         cc->crouching = false;
         cc->currentHeight = cc->height;
@@ -610,7 +612,7 @@ int runSelfTest(Application &app, EntityId player, float dt, EntityId flashlight
         { "walk D", { GLFW_KEY_D }, { 1.0f, 0.0f, 0.0f }, 2.4f },
         { "diagonal W+D", { GLFW_KEY_W, GLFW_KEY_D }, diagonal, 2.4f },
         { "sprint W", { GLFW_KEY_W, GLFW_KEY_LEFT_SHIFT }, { 0.0f, 0.0f, -1.0f }, 4.6f },
-        { "crouch W", { GLFW_KEY_W, GLFW_KEY_LEFT_CONTROL }, { 0.0f, 0.0f, -1.0f }, 1.2f },
+        { "crouch W", { GLFW_KEY_W, GLFW_KEY_C }, { 0.0f, 0.0f, -1.0f }, 1.2f },
     };
 
     for (const MoveCase &c : cases) {
@@ -690,6 +692,22 @@ int runSelfTest(Application &app, EntityId player, float dt, EntityId flashlight
             detail.str());
     }
 
+    // A complete tap between physics steps must survive render-only frames.
+    {
+        resetCharacter(app, player, padSpawn);
+        h.releaseAll();
+        for (int i = 0; i < 5; ++i) h.step();
+        app.input().setScriptedKey(GLFW_KEY_SPACE, true);
+        app.input().setScriptedKey(GLFW_KEY_SPACE, false);
+        app.input().update();
+        app.input().update();
+        h.step();
+        auto *cc = scene.find<CharacterController>(player);
+        report("short jump tap", cc && cc->velocity.y > 0.0f, "tap preserved across render-only frames");
+        bool bounced = false;
+        for (int i = 0; i < 120; ++i) { h.step(); if (i > 70 && cc->velocity.y > 0.0f) bounced = true; }
+        report("jump consumed once", !bounced && cc->grounded, "no repeated jump from one tap");
+    }
     // Corridor: walk straight into the far wall; must stop at the face and not
     // tunnel through or slide off-axis.
     {
@@ -958,7 +976,7 @@ int runSelfTest(Application &app, EntityId player, float dt, EntityId flashlight
         for (int i = 0; i < 5; ++i)
             h.step();
         const float eyeStanding = cam.position.y - scene.transform(player).position.y;
-        h.held = { GLFW_KEY_LEFT_CONTROL };
+        h.held = { GLFW_KEY_C };
         float maxStep = 0.0f;
         float prevY = cam.position.y;
         for (int i = 0; i < 60; ++i) {

@@ -3,7 +3,7 @@
 // Forward lighting:
 //  - very low ambient floor (dark rooms stay dark)
 //  - up to 8 point lights with quadratic falloff
-//  - one spotlight (the flashlight) with a 2x2-PCF shadow map
+//  - one spotlight (the flashlight) with a centered 5x5 weighted-PCF shadow map
 // Keep MAX_POINT_LIGHTS in sync with ForwardRenderer::kMaxPointLights.
 
 #define MAX_POINT_LIGHTS 8
@@ -54,21 +54,25 @@ uniform int uHasMetallicRoughnessTex;
 float sampleShadow(vec4 shadowPos, float ndotl)
 {
     // NDC [-1,1] -> texture/depth space [0,1] (classic remap step).
+    if (shadowPos.w <= 0.0) return 1.0;
     vec3 proj = shadowPos.xyz / shadowPos.w * 0.5 + 0.5;
-    if (proj.x < 0.0 || proj.x > 1.0 || proj.y < 0.0 || proj.y > 1.0 || proj.z > 1.0)
+    if (proj.x < 0.0 || proj.x > 1.0 || proj.y < 0.0 || proj.y > 1.0 || proj.z > 1.0 || proj.z < 0.0)
         return 1.0; // outside the shadow camera's frustum
     // Slope-scaled bias: steeper N.L needs a bigger offset to avoid acne.
     float bias = max(uShadowBias * (1.0 - ndotl), uShadowBias * 0.2);
     vec2 texel = 1.0 / textureSize(uShadowMap, 0);
 
     float sum = 0.0;
-    for (int x = -1; x <= 0; ++x) {
-        for (int y = -1; y <= 0; ++y) {
+    float weightSum = 0.0;
+    for (int x = -2; x <= 2; ++x) {
+        for (int y = -2; y <= 2; ++y) {
             float depth = texture(uShadowMap, proj.xy + vec2(x, y) * texel).r;
-            sum += (proj.z - bias > depth) ? 0.0 : 1.0;
+            float weight = float((3 - abs(x)) * (3 - abs(y)));
+            sum += weight * ((proj.z - bias > depth) ? 0.0 : 1.0);
+            weightSum += weight;
         }
     }
-    return sum * 0.25;
+    return sum / weightSum;
 }
 
 void main()

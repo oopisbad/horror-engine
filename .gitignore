@@ -27,3 +27,6 @@ build/_deps/
 
 # Flight recorder dumps (press F9 in game)
 debug_dump.txt
+
+/tools/
+/build-windows/

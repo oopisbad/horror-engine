@@ -30,9 +30,9 @@ constexpr float kStepHeight = 0.35f;
 constexpr float kMaxSubStep = 0.08f;
 constexpr int kMaxSubSteps = 8;
 constexpr float kBobFrequency = 9.5f;  // rad/s at full walk speed
-constexpr float kBobLateral = 0.04f;   // meters of sideways sway
-constexpr float kBobVertical = 0.03f;  // meters of vertical bounce
-constexpr float kBobRollAmplitude = 0.01f; // radians
+constexpr float kBobLateral = 0.008f;   // meters of sideways sway
+constexpr float kBobVertical = 0.008f;  // meters of vertical bounce
+constexpr float kBobRollAmplitude = 0.0015f; // radians
 
 // Overlap test between two AABB centers/extents.
 bool overlaps(const glm::vec3 &aCenter, const glm::vec3 &aHalf,
@@ -128,7 +128,13 @@ void CharacterSystem::step(Scene &scene, EntityId entity, const Hooks &hooks, fl
 
     // Jump is edge-triggered; holding space doesn't auto-bounce.
     bool jumped = false;
-    if (hooks.input->pressed(Action::Jump) && cc->grounded && !wantCrouch) {
+    cc->jumpBuffer = std::max(0.0f, cc->jumpBuffer - dt);
+    cc->coyoteTime = cc->grounded ? 0.10f : std::max(0.0f, cc->coyoteTime - dt);
+    if (hooks.input->consumeJumpPress()) cc->jumpBuffer = 0.12f;
+    if (hooks.input->keyboardWantedByImGui && !hooks.input->mouseCaptured()) cc->jumpBuffer = 0.0f;
+    if (cc->jumpBuffer > 0.0f && cc->coyoteTime > 0.0f && !wantCrouch) {
+        cc->jumpBuffer = cc->coyoteTime = 0.0f;
+        cc->grounded = false;
         cc->velocity.y = cc->jumpSpeed;
         jumped = true;
     }
@@ -334,7 +340,7 @@ void CharacterSystem::step(Scene &scene, EntityId entity, const Hooks &hooks, fl
     const bool bobDriving = cc->grounded && horizSpeed > 0.05f;
     if (bobDriving) {
         // Phase advances with speed so cadence feels tied to stride, not time.
-        cc->bobPhase += horizSpeed * dt * kBobFrequency;
+        cc->bobPhase += std::clamp(horizSpeed / cc->walkSpeed, 0.0f, 1.3f) * dt * kBobFrequency;
     }
     cc->bobAmount = glm::mix(cc->bobAmount, bobDriving ? 1.0f : 0.0f,
         std::min(dt * 8.0f, 1.0f));

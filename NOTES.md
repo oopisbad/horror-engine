@@ -650,3 +650,28 @@ transform; nothing about the skinning changes.
 - Sound, UI/gameplay menus and AI are out of scope for now.
 - The material placeholder is a `ForwardRenderer` member (no statics in
   `Texture`); any new GL-owning singleton must follow the same rule.
+
+## Windows update — 2026-11-08
+
+Windows is supported with the portable w64devkit C++20 compiler, CMake and Ninja.
+Keep the extracted kit at tools/w64devkit inside this repository under Music.
+No global PATH modification is required. Run build-windows.bat, then
+run-windows.bat. Output is build-windows/game.exe; OpenGL 4.5 drivers are required.
+After moving/renaming the repository, use a fresh CMake build directory: caches
+contain absolute paths. The current installation lives in Music/goreX.
+The Linux-only execinfo include is guarded, and ImGui explicitly links GLFW.
+
+Controls: WASD movement; Ctrl or Shift sprint; C crouch; Space jump; F1 debug UI.
+Camera sway/bounce and roll are substantially reduced; cadence is normalized to
+walking speed and capped during sprinting. Space press events persist until a
+physics step consumes them, including taps released within one event poll.
+Jump requests buffer for 120 ms before landing, with 100 ms grace after leaving
+an edge. A consumed press cannot repeatedly jump. Focus loss clears pending input.
+
+Flashlight shadows now default to 2048 pixels with centered, weighted 5x5 PCF
+instead of the offset 2x2 filter. This softens edges and reduces directional
+filter artifacts. This remains shadow mapping, not ray tracing or area-light
+contact-hardening; point lights still do not cast shadows. Use --shadow 1024
+on slower hardware. Self-tests include render-only-frame jump taps and no repeat.
+Assets and shaders are copied beside game.exe. Launch from its output directory when distributing the build.
+Validation: Windows RelWithDebInfo build passed; 29/29 self-tests passed; 90-frame rendering test passed on Radeon RX 580 at 2048 shadow resolution.

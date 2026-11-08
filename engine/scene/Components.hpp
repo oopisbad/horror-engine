@@ -143,6 +143,8 @@ struct CharacterController {
     // Runtime state (not authored).
     glm::vec3 velocity{0.0f};
     glm::vec3 lastPush{0.0f};      // debug: collision push-out applied by the last step
+    float jumpBuffer = 0.0f;
+    float coyoteTime = 0.0f;
     bool grounded = false;
     bool crouching = false;
     float currentHeight = 1.75f;   // smoothly lerps toward target height
