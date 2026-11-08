@@ -27,8 +27,8 @@ Input::Input()
     bindings_[(size_t)Action::MoveBackward] = { GLFW_KEY_S, GLFW_KEY_DOWN };
     bindings_[(size_t)Action::MoveLeft] = { GLFW_KEY_A, GLFW_KEY_LEFT };
     bindings_[(size_t)Action::MoveRight] = { GLFW_KEY_D, GLFW_KEY_RIGHT };
-    bindings_[(size_t)Action::Sprint] = { GLFW_KEY_LEFT_SHIFT, GLFW_KEY_LEFT_CONTROL };
-    bindings_[(size_t)Action::Crouch] = { GLFW_KEY_C };
+    bindings_[(size_t)Action::Sprint] = { GLFW_KEY_LEFT_SHIFT };
+    bindings_[(size_t)Action::Crouch] = { GLFW_KEY_LEFT_CONTROL, GLFW_KEY_C };
     bindings_[(size_t)Action::Jump] = { GLFW_KEY_SPACE };
     bindings_[(size_t)Action::Interact] = { GLFW_KEY_E };
     bindings_[(size_t)Action::ToggleDebugUI] = { GLFW_KEY_F1 };

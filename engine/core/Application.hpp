@@ -51,6 +51,10 @@ public:
     // Gameplay hooks ---------------------------------------------------------
     // Fixed timestep: physics/player logic. dt is exactly Config::fixedStep.
     std::function<void(float)> onFixedStep;
+    std::function<void()> onDrawUI;
+    std::function<void()> onEscape;
+    bool simulationEnabled = true;
+    bool gameplayInputEnabled = true;
     // Variable per-frame pre-render: animations, camera smoothing, etc.
     std::function<void(float)> onFrameUpdate;
 

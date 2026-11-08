@@ -661,7 +661,7 @@ After moving/renaming the repository, use a fresh CMake build directory: caches
 contain absolute paths. The current installation lives in Music/goreX.
 The Linux-only execinfo include is guarded, and ImGui explicitly links GLFW.
 
-Controls: WASD movement; Ctrl or Shift sprint; C crouch; Space jump; F1 debug UI.
+Controls: WASD movement; Shift sprint; Ctrl or C crouch; Space jump; F1 debug UI.
 Camera sway/bounce and roll are substantially reduced; cadence is normalized to
 walking speed and capped during sprinting. Space press events persist until a
 physics step consumes them, including taps released within one event poll.
@@ -675,3 +675,39 @@ contact-hardening; point lights still do not cast shadows. Use --shadow 1024
 on slower hardware. Self-tests include render-only-frame jump taps and no repeat.
 Assets and shaders are copied beside game.exe. Launch from its output directory when distributing the build.
 Validation: Windows RelWithDebInfo build passed; 29/29 self-tests passed; 90-frame rendering test passed on Radeon RX 580 at 2048 shadow resolution.
+
+## Main menu and player-hosted lobby — 2026-11-08
+
+Normal launch opens a black menu with white Play, Settings and Multiplayer text
+on the left. Settings is intentionally a placeholder pending the user's design.
+Play starts solo; Escape pauses/resumes, with Resume and Main menu options.
+Use Alt+F4/window close to exit. --play bypasses the menu for rendering tests.
+Movement and animation stop in menus. Mouse capture and pending jump input reset
+on transitions. F1 debug UI is available while playing.
+
+GameSession separates session state, a tick counter, stable player IDs and local
+scene entity handles. SessionPlayer.characterId is a placeholder selection key
+for later character assets; supplied models are not imported yet.
+MenuVideo is an adapter interface for opening a custom video, advancing playback,
+and providing an OpenGL frame texture with an aspect ratio. Frontend::setVideo
+accepts an adapter and file. The default remains black; no decoder or video file
+is bundled, so arbitrary MP4 playback is not implemented yet.
+
+Multiplayer is a working direct-IPv4 TCP lobby on port 27015, with one player
+hosting and up to three guests. The host coordinates membership and ready state.
+Join using the host's LAN IPv4; internet access requires a reachable host and
+TCP port forwarding/firewall allowance. No automatic NAT traversal, relay,
+matchmaking, authentication, encryption, or host migration is implemented.
+Ready states are shared, but starting synchronized multiplayer gameplay is not
+implemented: world replication and remote character control remain future work.
+Host shutdown disconnects guests. Peers time out after 10 seconds without data;
+connect attempts time out after 8 seconds. Protocol v1 has bounded buffers and
+per-frame socket work, handles partial TCP reads/writes, and rejects a fifth peer.
+The implementation uses Windows Winsock; tools remain under Music/goreX/tools.
+
+Checks: --lobby-test exercises actual loopback TCP with 4 peers, ready propagation,
+a fifth peer rejected, leave/rejoin, host shutdown and invalid address handling.
+--frontend-test checks menu/play/pause/resume/leave/restart and mouse capture.
+--selftest retains the movement/animation regression checks.
+Validation: 29/29 gameplay checks, frontend lifecycle test, loopback lobby integration and menu screenshot inspection passed on Windows. No remote-machine or internet connectivity test has been performed.
+Quit opens a centered "Misclick?" confirmation: Keep playing cancels, Quit game closes the application and lobby sockets. Escape dismisses the confirmation.

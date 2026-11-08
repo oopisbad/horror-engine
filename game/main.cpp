@@ -1,3 +1,4 @@
+#include "game/Frontend.hpp"
 #include "anim/Animator.hpp"
 #include "anim/SkinDebug.hpp"
 #include "asset/GltfAsset.hpp"
@@ -1165,6 +1166,8 @@ int main(int argc, char **argv)
 {
     using namespace horror;
 
+    for (int i = 1; i < argc; ++i) if (std::string_view(argv[i]) == "--lobby-test") return runLobbyTests();
+
     // Tiny arg parser: the smoke-test/CICapture flags matter more than full
     // CLI polish at this stage.
     Application::Config cfg;
@@ -1172,6 +1175,8 @@ int main(int argc, char **argv)
     int screenshotFrame = 29;
     std::string screenshotPath;
     std::string script;      // --script: scripted input before the main loop
+    bool quickplay = false;
+    bool frontendTest = false;
     bool selftest = false;   // --selftest: scripted movement/mouse assertions
     bool testModels = false; // --test-models: load CesiumMan/Fox sample assets
     bool debugInput = false; // --debug-input: per-step/per-frame input trace
@@ -1181,7 +1186,9 @@ int main(int argc, char **argv)
     for (int i = 1; i < argc; ++i) {
         const std::string a = argv[i];
         auto value = [&]() -> const char * { return i + 1 < argc ? argv[++i] : ""; };
-        if (a == "--w")
+        if (a == "--play") quickplay = true;
+        else if (a == "--frontend-test") frontendTest = true;
+        else if (a == "--w")
             cfg.windowWidth = static_cast<uint32_t>(std::atoi(value()));
         else if (a == "--h")
             cfg.windowHeight = static_cast<uint32_t>(std::atoi(value()));
@@ -1304,11 +1311,20 @@ int main(int argc, char **argv)
             cesiumMan, fox);
         return failures == 0 ? 0 : 1;
     }
-    if (!script.empty())
-        runScript(app, player, cfg.fixedStepSeconds, script, debugInput);
 
+
+    const glm::vec3 initialSpawn = app.scene().transform(player).position;
+    Frontend frontend(app, player, [&] {
+        resetCharacter(app, player, initialSpawn);
+        syncFlashlight(app, flashlight);
+    });
+    if (quickplay || !script.empty()) frontend.start();
+    if (!script.empty()) runScript(app, player, cfg.fixedStepSeconds, script, debugInput);
+    app.onDrawUI = [&] { frontend.draw(); };
+    app.onEscape = [&] { frontend.escape(); };
     app.onFixedStep = [&](float dt) {
-        CharacterSystem::step(app.scene(), player, hooks, dt);
+        frontend.session.advance();
+        CharacterSystem::step(app.scene(), frontend.session.localEntity(), hooks, dt);
         updatePatrol(app.scene(), patrolUnits, dt, patrolEnabled);
         updateTriggers(app, player);
 
@@ -1327,13 +1343,27 @@ int main(int argc, char **argv)
     // Screenshot capture is deferred ~30 frames so startup (shadow map init,
     // ImGui font bake) has definitely settled before the image is read back.
     app.onFrameUpdate = [&](float frameDt) {
+        if (frontendTest) {
+            auto require = [&](bool ok) { if (!ok) { HOR_LOG_ERROR("frontend test failed at frame {}", app.framesRun()); std::exit(2); } };
+            const int f = app.framesRun();
+            if (f == 0) require(!app.simulationEnabled && !app.input().mouseCaptured());
+            if (f == 2) { frontend.start(); require(frontend.session.players().size() == 1 && app.input().mouseCaptured()); }
+            if (f == 5) { frontend.escape(); require(!app.simulationEnabled && !app.input().mouseCaptured()); }
+            if (f == 8) { frontend.resume(); require(app.simulationEnabled); }
+            if (f == 12) { frontend.leave(); require(frontend.session.players().empty() && !app.simulationEnabled); }
+            if (f == 15) { frontend.start(); require(frontend.session.tick() == 0 && frontend.session.players().size() == 1); }
+            if (f == 18) frontend.leave();
+            if (f == 20) { frontend.requestQuit(); require(frontend.confirmingQuit()); }
+            if (f == 25) { frontend.escape(); require(!frontend.confirmingQuit() && !app.simulationEnabled); }
+            if (f == 28) { HOR_LOG_INFO("frontend lifecycle and quit cancel PASS"); app.quit(); }
+        }
         (void)player;
         (void)flashlight;
 
         // Key handling that changes game state lives here, not in the fixed
         // step: several fixed steps can run per frame, and an edge action
         // would then toggle once per step.
-        if (app.input().pressed(Action::TogglePatrol)) {
+        if (app.simulationEnabled && app.input().pressed(Action::TogglePatrol)) {
             patrolEnabled = !patrolEnabled;
             noteHotkey(kHotkeyPatrol);
             HOR_LOG_INFO("patrol {}", patrolEnabled ? "on" : "off");

@@ -96,3 +96,7 @@ add_dependencies(game copy_shaders copy_assets)
 source_group(TREE ${CMAKE_CURRENT_SOURCE_DIR} FILES ${ENGINE_SOURCES} ${GAME_SOURCES})
 
 install(TARGETS engine game)
+
+if(WIN32)
+    target_link_libraries(game PRIVATE ws2_32)
+endif()

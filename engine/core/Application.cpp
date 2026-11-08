@@ -64,9 +64,11 @@ int Application::run()
         if (showImGui)
             imgui_->drawDebugWindows(*this);
 
+        if (onDrawUI) onDrawUI();
+        if (!simulationEnabled) input_.consumeJumpPress();
         const int steps = logic_.stepsToRun(frameDt);
         for (int i = 0; i < steps; ++i)
-            if (onFixedStep)
+            if (simulationEnabled && onFixedStep)
                 onFixedStep(logic_.fixedStepSeconds());
         if (onFrameUpdate)
             onFrameUpdate(frameDt);
@@ -91,7 +93,7 @@ int Application::run()
 
         // Animation runs at the variable frame rate (not the fixed step) so
         // playback stays smooth; gameplay decides what to play per frame.
-        AnimationSystem::update(scene_, frameDt);
+        if (simulationEnabled) AnimationSystem::update(scene_, frameDt);
 
         scene_.updateWorldMatrices();
         scene_.refreshColliderBounds();
@@ -101,12 +103,12 @@ int Application::run()
         renderer_.setTime(elapsed_);
         renderer_.render(scene_, camera_);
 
+        imgui_->renderPass();
         if (!screenshotPath_.empty()) {
             takeScreenshot(screenshotPath_);
             screenshotPath_.clear();
         }
 
-        imgui_->renderPass();
         window_.swapBuffers();
         renderer_.tickShaderReloads();
 
@@ -123,9 +125,9 @@ void Application::handleHotkeys()
     // always shows what was pressed on the frame something went wrong.
     if (input_.pressed(Action::Quit)) {
         noteHotkey(kHotkeyQuit);
-        quit();
+        if (onEscape) onEscape(); else quit();
     }
-    if (input_.pressed(Action::ToggleDebugUI)) {
+    if (gameplayInputEnabled && input_.pressed(Action::ToggleDebugUI)) {
         noteHotkey(kHotkeyUI);
         showImGui = !showImGui;
         // Grab/release the cursor with the overlay so aiming stops while UI.
@@ -185,6 +187,7 @@ void Application::takeScreenshot(const std::string &path)
     header[14] = static_cast<uint8_t>(h & 0xFF);
     header[15] = static_cast<uint8_t>((h >> 8) & 0xFF);
     header[16] = 24; // bpp
+    header[17] = 0x20; // pixel rows below are top-down
     std::fwrite(header, 1, sizeof(header), f);
     std::vector<uint8_t> flipped(pixels.size());
     for (int row = 0; row < h; ++row)
