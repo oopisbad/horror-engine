@@ -10,6 +10,7 @@ Frontend::Frontend(Application &app, EntityId player, std::function<void()> rese
 void Frontend::sync() {
     const bool playing = session.state() == GameSession::State::Playing;
     app_.simulationEnabled = playing;
+    app_.worldVisible = playing;
     app_.gameplayInputEnabled = playing;
     app_.showImGui = false;
     app_.input().consumeJumpPress();

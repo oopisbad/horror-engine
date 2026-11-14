@@ -2,6 +2,7 @@
 
 #include "core/Log.hpp"
 #include "scene/Components.hpp"
+#include "render/RenderVolumes.hpp"
 
 #include <glm/glm.hpp>
 #include <glm/gtc/quaternion.hpp>
@@ -16,6 +17,7 @@ namespace horror {
 
 class Mesh;
 class Shader;
+class Texture;
 struct Material;
 
 // Scene = component storage + transform hierarchy.
@@ -97,6 +99,7 @@ public:
     // Material/mesh pools the scene owns (mesh/material pointers handed to
     // components point into these; RAII keeps them valid for scene lifetime).
     // TODO(assets): replace with a streamed asset system + refcounted handles.
+    Texture *addTexture(std::unique_ptr<Texture> texture);
     Material *createMaterial(const std::string &name = "material");
     Mesh *addMesh(std::unique_ptr<Mesh> mesh);
 
@@ -131,6 +134,12 @@ private:
             return stores_.spawnPoints;
         else if constexpr (std::is_same_v<T, TriggerVolume>)
             return stores_.triggerVolumes;
+        else if constexpr (std::is_same_v<T, FogVolume>)
+            return stores_.fogVolumes;
+        else if constexpr (std::is_same_v<T, ReflectionProbe>)
+            return stores_.reflectionProbes;
+        else if constexpr (std::is_same_v<T, SurfaceDecal>)
+            return stores_.surfaceDecals;
         else if constexpr (std::is_same_v<T, EntityExtras>)
             return stores_.entityExtras;
     }
@@ -146,6 +155,9 @@ private:
         std::unordered_map<EntityId, SpawnPoint> spawnPoints;
         std::unordered_map<EntityId, TriggerVolume> triggerVolumes;
         std::unordered_map<EntityId, EntityExtras> entityExtras;
+        std::unordered_map<EntityId, FogVolume> fogVolumes;
+        std::unordered_map<EntityId, ReflectionProbe> reflectionProbes;
+        std::unordered_map<EntityId, SurfaceDecal> surfaceDecals;
     };
 
     std::vector<EntityRecord> entityRecords_;
@@ -156,6 +168,7 @@ private:
     Stores stores_;
     std::vector<std::string> names_;
 
+    std::vector<std::unique_ptr<Texture>> texturePool_;
     std::vector<std::unique_ptr<Material>> materialPool_;
     std::vector<std::unique_ptr<Mesh>> meshPool_;
 

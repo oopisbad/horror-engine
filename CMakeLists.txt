@@ -80,6 +80,13 @@ file(GLOB_RECURSE GAME_SOURCES CONFIGURE_DEPENDS game/*.cpp)
 add_executable(game ${GAME_SOURCES})
 target_link_libraries(game PRIVATE engine)
 
+option(HOR_GNU_O3 "Use GCC -O3 for first-party optimized builds" OFF)
+if(HOR_GNU_O3 AND CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
+    foreach(target engine game)
+        target_compile_options(${target} PRIVATE "$<$<OR:$<CONFIG:Release>,$<CONFIG:RelWithDebInfo>>:-O3>")
+    endforeach()
+endif()
+
 # Shader sync as its own ALL target: a POST_BUILD hook on `game` would skip
 # when the binary is unchanged, and stale shaders then silently defeat the
 # in-engine hot reload (mtime unchanged).

@@ -9,22 +9,18 @@
 
 namespace horror {
 
-// Owned GL framebuffer with color(+depth) attachments. Built for the
-// offscreen targets a future post-processing chain needs: render the scene
-// into this, then blit/up-scale to the swapchain. The shadow map uses a
-// depth-only variant, and the post-pass stub wires a full-screen draw.
-//
-// Anything non-texture-planned doesn't belong here; instead an explicit
-// `postProcess` entry point lives on the renderer.
+// Owned framebuffer with texture attachments for the scene, shadows or post effects.
 class Framebuffer {
 public:
     enum class Kind : uint8_t {
-        ColorDepth,   // RGBA8 + depth: offscreen scene target / post scratch
+        Surface,      // HDR scene color, packed surface data and depth
+        ColorDepth,   // color and depth: offscreen scene target
+        ColorAlpha,   // RGBA16F post buffer without a depth attachment
+        ColorOnly,    // compact floating-point RGB for post filters
         DepthOnly,    // depth attachment only: shadow maps
     };
 
-    // `hdr` selects an RGBA16F color attachment (scene target for the post
-    // chain, where lighting may exceed 1.0 before tonemapping).
+    // `hdr` uses packed floating-point RGB, or RGBA16F for ColorAlpha.
     explicit Framebuffer(Kind kind, uint32_t width, uint32_t height, bool hdr = false);
     ~Framebuffer();
     Framebuffer(Framebuffer &&) noexcept;

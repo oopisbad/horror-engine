@@ -25,7 +25,9 @@ public:
         uint32_t windowWidth = 1280;
         uint32_t windowHeight = 720;
         bool fullscreen = false;
+        bool visible = true;
         bool vsync = true;
+        unsigned frameRateLimit = 0;
         bool wireframe = false; // start with polygon mode LINE (--wireframe)
         float fixedStepSeconds = 1.0f / 60.0f;
         uint32_t shadowMapSize = 2048;
@@ -54,6 +56,7 @@ public:
     std::function<void()> onDrawUI;
     std::function<void()> onEscape;
     bool simulationEnabled = true;
+    bool worldVisible = true;
     bool gameplayInputEnabled = true;
     // Variable per-frame pre-render: animations, camera smoothing, etc.
     std::function<void(float)> onFrameUpdate;

@@ -1,4 +1,5 @@
 #include "game/Frontend.hpp"
+#include "game/ImportLab.hpp"
 #include "anim/Animator.hpp"
 #include "anim/SkinDebug.hpp"
 #include "asset/GltfAsset.hpp"
@@ -8,6 +9,7 @@
 #include "debug/FlightRecorder.hpp"
 #include "render/Material.hpp"
 #include "render/Mesh.hpp"
+#include "render/Texture.hpp"
 #include "scene/CharacterController.hpp"
 #include "scene/Components.hpp"
 #include "scene/Scene.hpp"
@@ -16,6 +18,8 @@
 
 #include <algorithm>
 #include <cstdlib>
+#include <cmath>
+#include <numeric>
 #include <cstring>
 #include <initializer_list>
 #include <limits>
@@ -40,6 +44,51 @@ constexpr float kFlashlightAimDistance = 12.0f;
 // Procedural placeholders only (no assets yet): a dark test corridor, some
 // boxes to prove collision, two point lights, camera + flashlight. Every
 // mesh instance built here lives in Scene's pool so RAII cleans up in order.
+// Generate a seamless, mipmapped detail texture once, keeping the shader to
+// one lookup for concrete albedo and surface slopes.
+Texture *makeConcrete(Scene &scene)
+{
+    constexpr int size = 128;
+    std::vector<float> height(size * size);
+    const auto hash = [](int x, int y) {
+        uint32_t n = static_cast<uint32_t>(x) * 0x9e3779b9u + static_cast<uint32_t>(y) * 0x85ebca6bu;
+        n = (n ^ (n >> 16)) * 0x7feb352du;
+        return static_cast<float>((n ^ (n >> 15)) & 65535u) / 65535.0f;
+    };
+    for (int y = 0; y < size; ++y) {
+        for (int x = 0; x < size; ++x) {
+            float sum = 0.0f;
+            for (int grid : {4, 8, 16, 32, 64, 128}) {
+                const float u = float(x * grid) / size, v = float(y * grid) / size;
+                const int ix = static_cast<int>(u), iy = static_cast<int>(v);
+                float s = u - ix, t = v - iy;
+                s = s * s * (3.0f - 2.0f * s);
+                t = t * t * (3.0f - 2.0f * t);
+                const float a = glm::mix(hash(ix, iy), hash((ix+1)%grid, iy), s);
+                const float b = glm::mix(hash(ix, (iy+1)%grid), hash((ix+1)%grid, (iy+1)%grid), s);
+                sum += glm::mix(a, b, t) / std::sqrt(float(grid));
+            }
+            height[y * size + x] = sum;
+        }
+    }
+    std::vector<uint8_t> pixels(size * size * 4);
+    const auto at = [&](int x, int y) { return height[((y+size)%size)*size + (x+size)%size]; };
+    const auto byte = [](float f) { return static_cast<uint8_t>(std::clamp(f, 0.0f, 1.0f) * 255.0f + 0.5f); };
+    for (int y = 0; y < size; ++y) {
+        for (int x = 0; x < size; ++x) {
+            const auto i = 4 * (y * size + x);
+            pixels[i] = byte((at(x,y) - 0.47f) * 2.4f + 0.55f);
+            pixels[i+1] = byte(0.5f + (at(x-1,y) - at(x+1,y)) * 2.8f);
+            pixels[i+2] = byte(0.5f + (at(x,y-1) - at(x,y+1)) * 2.8f);
+            pixels[i+3] = 255;
+        }
+    }
+    Texture::Params params;
+    params.srgb = false;
+    return scene.addTexture(std::make_unique<Texture>(GL_RGBA8, size, size, 1,
+        GL_RGBA, GL_UNSIGNED_BYTE, pixels.data(), params));
+}
+
 void buildTestScene(Application &app)
 {
     Scene &scene = app.scene();
@@ -53,11 +102,15 @@ void buildTestScene(Application &app)
     Mesh *floor = scene.addMesh(std::make_unique<Mesh>(Mesh::makePlane(kFloorHalfExtent, 4, "floor")));
     Mesh *ball = scene.addMesh(std::make_unique<Mesh>(Mesh::makeSphere(0.3f, "ball")));
 
+    Texture *concrete = makeConcrete(scene);
+
     // A handy material-factory lambda to keep call sites terse.
     auto mat = [&](const glm::vec3 &albedo, float rough = 0.85f) {
         Material *m = scene.createMaterial();
         m->albedo = albedo;
         m->roughness = rough;
+        m->detailTex = concrete;
+        m->detailScale = 0.65f;
         return m;
     };
 
@@ -65,7 +118,7 @@ void buildTestScene(Application &app)
     // reuse as a wall later). -90 deg around X maps the plane's local +Z
     // normal to world +Y; +90 would point it down and back-face cull it.
     EntityId f = scene.create("floor");
-    scene.add(f, MeshRenderer{ floor, mat({0.28f, 0.27f, 0.25f}, 0.95f), true, true });
+    scene.add(f, MeshRenderer{ floor, mat({0.27f, 0.30f, 0.31f}, 0.29f), true, true });
     {
         Transform &t = scene.transform(f);
         t.position = { 0.0f, 0.0f, 0.0f };
@@ -154,6 +207,68 @@ void buildTestScene(Application &app)
         scene.add(e, PointLight{ glm::vec3(1.0f, 0.15f, 0.1f), 10.0f, 0.2f, 6.0f, false });
     }
 
+    // Bake static fixtures by material so detail adds triangles without a draw
+    // call per fixture. Keep these corridor-sized batches separate from colliders.
+    struct FixtureBatch {
+        Material *material;
+        Mesh::Geometry geometry;
+    };
+    std::vector<FixtureBatch> fixtures;
+    const Mesh::Geometry unitCube = Mesh::makeCubeGeometry(0.5f);
+    const auto fixture = [&](glm::vec3 pos, glm::vec3 scale, Material *material) {
+        auto batch = std::find_if(fixtures.begin(), fixtures.end(),
+            [material](const FixtureBatch &item) { return item.material == material; });
+        if (batch == fixtures.end()) {
+            fixtures.push_back({material, {}});
+            batch = fixtures.end() - 1;
+        }
+        auto &geometry = batch->geometry;
+        const auto base = static_cast<uint32_t>(geometry.vertices.size());
+        for (Vertex vertex : unitCube.vertices) {
+            vertex.position = pos + vertex.position * scale;
+            vertex.normal = glm::normalize(vertex.normal / scale);
+            geometry.vertices.push_back(vertex);
+        }
+        for (uint32_t index : unitCube.indices)
+            geometry.indices.push_back(base + index);
+    };
+    auto *trim = mat({0.15f, 0.19f, 0.22f}, 0.42f);
+    trim->metallic = 0.42f;
+    fixture({0, 3.18f, -3.85f}, {3.48f, 0.18f, 13.7f}, mat({0.26f, 0.29f, 0.31f}));
+    for (float z : {-1.2f, -4.4f, -7.8f}) {
+        fixture({0, 3.04f, z}, {3.34f, 0.17f, 0.27f}, trim);
+        fixture({-1.62f, 1.6f, z}, {0.075f, 3.0f, 0.26f}, trim);
+        fixture({1.62f, 1.6f, z}, {0.075f, 3.0f, 0.26f}, trim);
+    }
+    auto *coolStrip = mat({0.13f, 0.32f, 0.40f}, 0.45f);
+    coolStrip->detailTex = nullptr;
+    coolStrip->emissiveColor = {0.32f, 0.76f, 1.0f};
+    coolStrip->emissiveStrength = 3.4f;
+    auto *alarmStrip = mat({0.34f, 0.07f, 0.04f});
+    alarmStrip->detailTex = nullptr;
+    alarmStrip->emissiveColor = {1.0f, 0.11f, 0.035f};
+    alarmStrip->emissiveStrength = 5.0f;
+    fixture({0.3f, 2.94f, -4.4f}, {1.26f, 0.055f, 0.10f}, coolStrip);
+    fixture({0.62f, 2.18f, -10.25f}, {0.86f, 0.12f, 0.08f}, alarmStrip);
+    for (float x : {-1.59f, 1.59f}) {
+        fixture({x, 0.18f, -3.85f}, {0.13f, 0.24f, 12.8f}, trim);
+        fixture({x, 2.42f, -3.85f}, {0.11f, 0.08f, 12.8f}, trim);
+    }
+    for (int i = 0; i < 8; ++i)
+        fixture({1.585f, 1.12f + i * 0.095f, -6.4f}, {0.12f, 0.048f, 0.92f}, trim);
+    for (auto &batch : fixtures) {
+        const auto id = scene.create("corridor fixtures");
+        Mesh *mesh = scene.addMesh(std::make_unique<Mesh>(std::move(batch.geometry), "fixture batch"));
+        scene.add(id, MeshRenderer{mesh, batch.material, false, true});
+    }
+
+    EntityId fill = scene.create("fluorescent light");
+    scene.transform(fill).position = {0.3f, 2.78f, -4.35f};
+    scene.add(fill, PointLight{glm::vec3(0.42f, 0.72f, 1.0f), 12.0f, 0.18f, 8.0f, false});
+    EntityId alarm = scene.create("emergency light");
+    scene.transform(alarm).position = {0.62f, 2.1f, -9.96f};
+    scene.add(alarm, PointLight{glm::vec3(1.0f, 0.14f, 0.06f), 13.0f, 0.18f, 6.0f, false});
+
     // Player: feet on the floor slab's top face so the spawn is not inside
     // collider geometry (the controller overwrites the camera position from
     // the feet every fixed step, so this is the only spawn that matters).
@@ -168,7 +283,7 @@ void buildTestScene(Application &app)
     // Flashlight entity: cone params come from the SpotLight component;
     // position/orientation are synced to the camera every fixed step below.
     EntityId flashlight = scene.create("flashlight");
-    scene.add(flashlight, SpotLight{});
+    scene.add(flashlight, SpotLight{glm::vec3(1.0f, 0.92f, 0.81f), 19.0f});
 }
 
 // World-space AABB of every rest-pose mesh under a level instance, taken from
@@ -490,12 +605,13 @@ void resetCharacter(Application &app, EntityId player, const glm::vec3 &feet)
 
 // --script "hold W 60; wait 30; mouse 120 0; hold S+SHIFT 60"
 void runScript(Application &app, EntityId player, float dt, const std::string &script,
-    bool verbose)
+    bool verbose, LevelPhysics *physics)
 {
     InputHarness h{ app, player, {}, dt };
     h.hooks.camera = &app.camera();
     h.hooks.input = &app.input();
     h.hooks.logSteps = verbose;
+    h.hooks.levelPhysics = physics;
 
     const glm::vec3 start = app.scene().transform(player).position;
     std::istringstream lines(script);
@@ -1176,6 +1292,15 @@ int main(int argc, char **argv)
     std::string screenshotPath;
     std::string script;      // --script: scripted input before the main loop
     bool quickplay = false;
+    bool importLab = false;
+    bool importCheck = false;
+    bool levelTour = false;
+    std::string levelPath;
+    bool benchmark = false;
+    bool checkVisuals = false;
+    bool noTemporal = false, noReflections = false, noLocalShadows = false;
+    bool debugDraw = false;
+    std::string graphics = "high";
     bool frontendTest = false;
     bool selftest = false;   // --selftest: scripted movement/mouse assertions
     bool testModels = false; // --test-models: load CesiumMan/Fox sample assets
@@ -1187,6 +1312,18 @@ int main(int argc, char **argv)
         const std::string a = argv[i];
         auto value = [&]() -> const char * { return i + 1 < argc ? argv[++i] : ""; };
         if (a == "--play") quickplay = true;
+        else if (a == "--benchmark") benchmark = true;
+        else if (a == "--check-visuals") { checkVisuals = true; importLab = true; benchmark = true; levelTour = true; }
+        else if (a == "--no-taa") noTemporal = true;
+        else if (a == "--no-ssr") noReflections = true;
+        else if (a == "--no-local-shadows") noLocalShadows = true;
+        else if (a == "--fps-cap") cfg.frameRateLimit = static_cast<unsigned>(std::clamp(std::atoi(value()), 0, 500));
+        else if (a == "--level") levelPath = value();
+        else if (a == "--import-lab") importLab = true;
+        else if (a == "--check-import-lab") { importLab = true; importCheck = true; }
+        else if (a == "--level-tour") { levelTour = true; benchmark = true; }
+        else if (a == "--debug-draw") debugDraw = true;
+        else if (a == "--graphics") graphics = value();
         else if (a == "--frontend-test") frontendTest = true;
         else if (a == "--w")
             cfg.windowWidth = static_cast<uint32_t>(std::atoi(value()));
@@ -1194,6 +1331,7 @@ int main(int argc, char **argv)
             cfg.windowHeight = static_cast<uint32_t>(std::atoi(value()));
         else if (a == "--vsync")
             cfg.vsync = std::strcmp(value(), "off") != 0;
+        else if (a == "--hidden") cfg.visible = false;
         else if (a == "--fullscreen")
             cfg.fullscreen = true;
         else if (a == "--frames")
@@ -1224,10 +1362,107 @@ int main(int argc, char **argv)
             cfg.wireframe = true;
     }
 
+    if (graphics != "high" && graphics != "balanced" && graphics != "fast") {
+        HOR_LOG_ERROR("--graphics expects high, balanced, or fast");
+        return 2;
+    }
+    if (benchmark) {
+        quickplay = true;
+        cfg.vsync = false;
+        if (frameLimit <= 120)
+            frameLimit = 1200;
+    }
+    if (importCheck || checkVisuals)
+        cfg.visible = false;
+    if (importLab)
+        levelPath = "test/import-lab.glb";
+    if ((!levelPath.empty() && selftest) || (levelTour && levelPath.empty())) {
+        HOR_LOG_ERROR("Use --selftest with the default corridor or --level-tour with an imported level");
+        return 2;
+    }
     Application app{ cfg };
+    if (graphics == "balanced") {
+        app.renderer().setRenderScale(0.85f);
+        app.renderer().setLocalShadowBudget(1, false);
+        app.renderer().post().screenReflections = false;
+        app.renderer().post().volumeSteps = 8;
+    } else if (graphics == "fast") {
+        app.renderer().setRenderScale(0.75f);
+        app.renderer().setLocalShadowBudget(0, false);
+        app.renderer().post().temporalAA = false;
+        app.renderer().post().screenReflections = false;
+        app.renderer().post().volumeSteps = 0;
+        app.renderer().post().bloom = 0.0f;
+    }
+    if (noTemporal) app.renderer().post().temporalAA = false;
+    if (noReflections) app.renderer().post().screenReflections = false;
+    if (noLocalShadows) app.renderer().setLocalShadowBudget(0, false);
+    app.renderer().setGpuProfiling(benchmark);
+    app.renderer().setDebugDrawEnabled(debugDraw);
+    std::vector<float> frameTimes;
+    std::array<double, 4> gpuTotals{};
+    uint32_t lastGpuSample = 0;
+    uint32_t cachedShadowPeak = 0, updatedShadowPeak = 0, temporalPeak = 0;
+    bool cutRejectedHistory = false;
+    size_t gpuCount = 0;
+    if (benchmark)
+        frameTimes.reserve(static_cast<size_t>(frameLimit));
     app.setFrameLimit(frameLimit);
 
-    buildTestScene(app);
+    LevelInstance imported;
+    glm::vec3 spawnFacing(0,0,-1);
+    glm::vec3 displayPosition(1.75f,0.015f,-3.1f);
+    struct TourPoint { std::string tag; glm::vec3 position; glm::vec3 forward; };
+    std::vector<TourPoint> tour;
+    if (levelPath.empty()) {
+        buildTestScene(app);
+    } else {
+        auto &scene = app.scene();
+        LevelOptions options;
+        options.bakePhysics = true;
+        imported = LevelBuilder::instantiate(scene, app.assets().loadModel(levelPath), {}, options);
+        if (!scene.valid(imported.root) || !imported.physics) {
+            HOR_LOG_ERROR("Unable to open imported level '{}'", levelPath);
+            return 2;
+        }
+        scene.updateWorldMatrices();
+        glm::vec3 spawn(0,0.02f,0);
+        bool haveSpawn = false;
+        for (EntityId id : imported.spawnPoints) {
+            const auto &marker = *scene.find<SpawnPoint>(id);
+            const glm::vec3 position(scene.worldMatrix(id)[3]);
+            if (marker.tag == "player" && !haveSpawn) {
+                spawn = position;
+                spawnFacing = marker.forward;
+                haveSpawn = true;
+            } else if (marker.tag == "display") {
+                displayPosition = position;
+            } else if (marker.tag.starts_with("camera_")) {
+                tour.push_back({marker.tag, position, marker.forward});
+            }
+        }
+        std::sort(tour.begin(), tour.end(), [](const TourPoint &a, const TourPoint &b) { return a.tag < b.tag; });
+        if (!haveSpawn) {
+            HOR_LOG_WARN("glTF '{}' has no SPAWN_player marker; using the origin", levelPath);
+        }
+        if (imported.lightmappedMeshes > 0)
+            HOR_LOG_INFO("level '{}': {} lightmapped primitives", levelPath, imported.lightmappedMeshes);
+        if (imported.physics->geometry.empty())
+            HOR_LOG_WARN("glTF '{}' has no static COL_ geometry", levelPath);
+        if (levelTour && tour.size() < 2) {
+            HOR_LOG_ERROR("--level-tour needs at least two SPAWN_camera_ markers");
+            return 2;
+        }
+        const EntityId playerId = scene.create("player");
+        scene.add(playerId, CharacterController{});
+        scene.transform(playerId).position = spawn;
+        const EntityId lampId = scene.create("flashlight");
+        scene.add(lampId, SpotLight{glm::vec3(1.0f, 0.92f, 0.81f), 19.0f});
+        scene.view<Animator>([](EntityId, Animator &anim) {
+            if (anim.clips && !anim.clips->empty())
+                anim.playIndex(0, 0, true);
+        });
+    }
 
     // Step 2 test content: Khronos sample models (skinned, animated). Held in
     // main's scope for the whole run: the level keeps the asset
@@ -1236,7 +1471,9 @@ int main(int argc, char **argv)
     // floor-snap assertions.
     LevelInstance cesiumMan;
     LevelInstance fox;
-    if (testModels || selftest || debugSkin) {
+    if (importLab)
+        spawnGltfLevel(app, "test/CesiumMan.glb", displayPosition, 180.0f, cesiumMan, nullptr, 1.0f, 0.0f);
+    if ((testModels || selftest || debugSkin) && levelPath.empty()) {
         // Flanking the corridor just ahead of the spawn: inside the flashlight
         // cone and unobstructed (the far end is hidden behind crate-3/pillar),
         // while the centre line between them stays walkable. The y in these
@@ -1273,13 +1510,13 @@ int main(int argc, char **argv)
     }
 
     // --- fixed-step gameplay ------------------------------------------------
-    EntityId player = 0; // first created entity is the player (see builder above)
-    EntityId flashlight = 0;
+    EntityId player = kInvalidEntity;
+    EntityId flashlight = kInvalidEntity;
     {
         // Find by name; index bookkeeping stays out of gameplay logic.
         Scene &s = app.scene();
         for (size_t i = 0; i < s.entityNames().size(); ++i) {
-            if (s.entityNames()[i] == "player")
+            if (s.entityNames()[i] == "player" && s.find<CharacterController>(static_cast<EntityId>(i)))
                 player = static_cast<EntityId>(i);
             if (s.entityNames()[i] == "flashlight")
                 flashlight = static_cast<EntityId>(i);
@@ -1300,7 +1537,7 @@ int main(int argc, char **argv)
     if (cfg.wireframe)
         app.renderer().setWireframe(true);
 
-    CharacterSystem::Hooks hooks{ &app.camera(), &app.input(), debugInput };
+    CharacterSystem::Hooks hooks{ &app.camera(), &app.input(), debugInput, imported.physics.get() };
 
     // Scripted runs happen before the render loop; the scene's static colliders
     // need world bounds by then, which Application only refreshes at loop start.
@@ -1313,18 +1550,42 @@ int main(int argc, char **argv)
     }
 
 
+    if (importCheck)
+        return checkImportLab(app, imported, player) ? 0 : 1;
+
     const glm::vec3 initialSpawn = app.scene().transform(player).position;
     Frontend frontend(app, player, [&] {
         resetCharacter(app, player, initialSpawn);
+        app.renderer().resetHistory();
+        if (imported.physics) {
+            imported.physics->reset(app.scene());
+            app.camera().yaw = std::atan2(-spawnFacing.x, -spawnFacing.z);
+            app.camera().pitch = std::asin(std::clamp(spawnFacing.y, -1.0f, 1.0f));
+        }
         syncFlashlight(app, flashlight);
     });
     if (quickplay || !script.empty()) frontend.start();
-    if (!script.empty()) runScript(app, player, cfg.fixedStepSeconds, script, debugInput);
+    if (benchmark) app.input().setMouseCaptured(false);
+    if (!script.empty()) runScript(app, player, cfg.fixedStepSeconds, script, debugInput, imported.physics.get());
     app.onDrawUI = [&] { frontend.draw(); };
     app.onEscape = [&] { frontend.escape(); };
     app.onFixedStep = [&](float dt) {
+        if (benchmark)
+            return; // keep the benchmark camera fixed while models animate
         frontend.session.advance();
         CharacterSystem::step(app.scene(), frontend.session.localEntity(), hooks, dt);
+        if (imported.physics) {
+            const auto &controller = *app.scene().find<CharacterController>(player);
+            const glm::vec3 half(controller.radius,controller.currentHeight*0.5f,controller.radius);
+            const auto feet = app.scene().transform(player).position;
+            imported.physics->stepProps(app.scene(), dt, feet+glm::vec3(0,half.y,0), half);
+            if (feet.y < initialSpawn.y-35.0f) {
+                resetCharacter(app, player, initialSpawn);
+        app.renderer().resetHistory();
+                app.camera().yaw = std::atan2(-spawnFacing.x, -spawnFacing.z);
+                app.camera().pitch = std::asin(std::clamp(spawnFacing.y, -1.0f, 1.0f));
+            }
+        }
         updatePatrol(app.scene(), patrolUnits, dt, patrolEnabled);
         updateTriggers(app, player);
 
@@ -1357,8 +1618,39 @@ int main(int argc, char **argv)
             if (f == 25) { frontend.escape(); require(!frontend.confirmingQuit() && !app.simulationEnabled); }
             if (f == 28) { HOR_LOG_INFO("frontend lifecycle and quit cancel PASS"); app.quit(); }
         }
-        (void)player;
-        (void)flashlight;
+        if (levelTour) {
+            const float progress = static_cast<float>(app.framesRun()) / std::max(1,frameLimit-1);
+            const float track = progress * static_cast<float>(tour.size()-1);
+            const auto index = std::min(static_cast<size_t>(track),tour.size()-2);
+            const float blend = std::clamp(track-static_cast<float>(index),0.0f,1.0f);
+            const auto &a = tour[index], &b = tour[index+1];
+            const float yawA = std::atan2(-a.forward.x,-a.forward.z);
+            const float yawB = std::atan2(-b.forward.x,-b.forward.z);
+            app.camera().position = glm::mix(a.position,b.position,blend);
+            app.camera().yaw = yawA + std::remainder(yawB-yawA,6.2831853f)*blend;
+            app.camera().pitch = std::asin(std::clamp(glm::mix(a.forward.y,b.forward.y,blend),-1.0f,1.0f));
+            if (checkVisuals && app.framesRun() >= frameLimit - 5)
+                app.camera().yaw += glm::half_pi<float>();
+            syncFlashlight(app, flashlight);
+        }
+        if (checkVisuals) {
+            const auto &stats = app.renderer().stats();
+            if (app.framesRun() == frameLimit - 4)
+                cutRejectedHistory = stats.temporalFrames == 1;
+            cachedShadowPeak = std::max(cachedShadowPeak, stats.cachedShadowFaces);
+            updatedShadowPeak = std::max(updatedShadowPeak, stats.updatedShadowFaces);
+            temporalPeak = std::max(temporalPeak, stats.temporalFrames);
+        }
+        if (benchmark && app.framesRun() >= 120) {
+            frameTimes.push_back(frameDt * 1000.0f);
+            const auto &stats = app.renderer().stats();
+            if (stats.gpuSamples != lastGpuSample) {
+                for (size_t i = 0; i < gpuTotals.size(); ++i)
+                    gpuTotals[i] += stats.gpuMs[i];
+                lastGpuSample = stats.gpuSamples;
+                ++gpuCount;
+            }
+        }
 
         // Key handling that changes game state lives here, not in the fixed
         // step: several fixed steps can run per frame, and an edge action
@@ -1380,6 +1672,10 @@ int main(int argc, char **argv)
             app.requestScreenshot(screenshotPath);
         if (app.framesRun() == 30) {
             const auto &rs = app.renderer().stats();
+            const auto &visual = rs;
+            HOR_LOG_INFO("visuals: {} shadow faces cached, {} updated, {} probes, {} decals, {} fogs, {} temporal frames",
+                visual.cachedShadowFaces, visual.updatedShadowFaces, visual.activeProbes, visual.activeDecals,
+                visual.activeFogVolumes, visual.temporalFrames);
             HOR_LOG_INFO("stats: submitted {} drawn {} culled {} tri {} shadow {}",
                 rs.itemsSubmitted, rs.itemsDrawn, rs.itemsCulled, rs.triangles, rs.shadowDraws);
             HOR_LOG_INFO("camera: pos ({:.3f},{:.3f},{:.3f}) yaw {:.3f} pitch {:.3f}",
@@ -1393,6 +1689,41 @@ int main(int argc, char **argv)
     };
 
     int exitCode = app.run();
+    if (benchmark && glGetError() != GL_NO_ERROR) {
+        HOR_LOG_ERROR("OpenGL error during graphics benchmark");
+        return 2;
+    }
+    if (checkVisuals) {
+        const auto &stats = app.renderer().stats();
+        const bool high = graphics == "high";
+        const bool shadowsExpected = graphics != "fast" && !noLocalShadows;
+        const bool temporalExpected = graphics != "fast" && !noTemporal;
+        const bool reflectionsExpected = high && !noReflections;
+        const auto report = [](bool pass, const char *name) {
+            HOR_LOG_INFO("visual check {}: {}", name, pass ? "PASS" : "FAIL");
+            return pass;
+        };
+        bool pass = report(imported.lightmappedMeshes >= 10, "UV1 lightmaps");
+        pass &= report(stats.activeProbes == 2 && stats.activeDecals == 3 && stats.activeFogVolumes == 2, "authored environment");
+        pass &= report(shadowsExpected ? (cachedShadowPeak > 0 && updatedShadowPeak > 0)
+                                      : (cachedShadowPeak == 0 && updatedShadowPeak == 0), "shadow caching and budget");
+        pass &= report(temporalExpected ? temporalPeak > 2 : temporalPeak == 0, "temporal history");
+        if (temporalExpected)
+            pass &= report(cutRejectedHistory, "history reset on a 90-degree turn");
+        pass &= report(stats.screenReflections == reflectionsExpected, "screen-reflection preset");
+        if (!pass)
+            return 3;
+    }
+    if (!frameTimes.empty()) {
+        const double average = std::accumulate(frameTimes.begin(), frameTimes.end(), 0.0) / frameTimes.size();
+        std::sort(frameTimes.begin(), frameTimes.end());
+        HOR_LOG_INFO("benchmark {} {}x{} | {} samples | mean {:.3f} ms ({:.1f} FPS), p95 {:.3f} ms",
+            graphics, app.window().frameWidth(), app.window().frameHeight(), frameTimes.size(),
+            average, 1000.0 / average, frameTimes[(frameTimes.size()-1)*95/100]);
+        if (gpuCount)
+            HOR_LOG_INFO("GPU mean ms | shadow {:.3f} | geometry {:.3f} | effects {:.3f} | composite {:.3f} | {} samples",
+                gpuTotals[0]/gpuCount, gpuTotals[1]/gpuCount, gpuTotals[2]/gpuCount, gpuTotals[3]/gpuCount, gpuCount);
+    }
     HOR_LOG_INFO("exiting (code {}) after {} frames", exitCode, app.framesRun());
     return exitCode;
 }

@@ -6,6 +6,7 @@
 #include <glm/glm.hpp>
 #include <glm/gtc/quaternion.hpp>
 
+#include <cstdint>
 #include <memory>
 #include <string>
 #include <unordered_map>
@@ -19,6 +20,8 @@ class Texture;
 // One drawable primitive of a glTF mesh (usually one material).
 struct GltfMeshPart {
     std::shared_ptr<Mesh> mesh;
+    std::vector<uint32_t> collisionIndices; // retained only for COL_MESH_ nodes
+    bool hasLightmapUv = false;
     int material = -1; // index into GltfModel::materials(), -1 = default
 };
 
@@ -78,6 +81,7 @@ public:
     bool valid() const { return valid_; }
     const std::string &error() const { return error_; }
     const std::string &path() const { return path_; }
+    const std::string &resolvedPath() const { return resolvedPath_; }
 
     const std::vector<GltfNode> &nodes() const { return nodes_; }
     const std::vector<GltfMesh> &meshes() const { return meshes_; }

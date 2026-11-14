@@ -48,6 +48,7 @@ public:
     int width() const { return static_cast<int>(width_); }
     int height() const { return static_cast<int>(height_); }
     bool isSrgb() const { return srgb_; }
+    bool isFallback() const { return fallback_; }
 
     // Bind to a sampler uniform unit; defaults to unit 0 (see material binds).
     // Texture units are tracked explicitly in the renderer instead.
@@ -58,6 +59,7 @@ private:
     GLuint texture_ = 0;
     uint32_t width_ = 0, height_ = 0, depth_ = 0;
     bool srgb_ = false;
+    bool fallback_ = false;
 };
 
 } // namespace horror

@@ -1,4 +1,5 @@
 #include "scene/Scene.hpp"
+#include "render/Texture.hpp"
 
 #include "core/Log.hpp"
 #include "render/Material.hpp"
@@ -64,6 +65,9 @@ void Scene::destroy(EntityId e)
     stores_.spawnPoints.erase(e);
     stores_.triggerVolumes.erase(e);
     stores_.entityExtras.erase(e);
+    stores_.fogVolumes.erase(e);
+    stores_.reflectionProbes.erase(e);
+    stores_.surfaceDecals.erase(e);
 }
 
 const std::string &Scene::name(EntityId e) const
@@ -126,6 +130,11 @@ void Scene::refreshColliderBounds()
         col.worldMin = mn;
         col.worldMax = mx;
     });
+}
+
+Texture *Scene::addTexture(std::unique_ptr<Texture> texture)
+{
+    return texturePool_.emplace_back(std::move(texture)).get();
 }
 
 Material *Scene::createMaterial(const std::string &name)

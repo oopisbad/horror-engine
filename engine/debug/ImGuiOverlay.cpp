@@ -134,6 +134,13 @@ void ImGuiOverlay::drawDebugWindows(Application &app)
         ImGui::Text("post");
         auto &post = renderer.post();
         ImGui::Checkbox("post enabled", &post.enabled);
+        ImGui::SliderFloat("bloom", &post.bloom, 0.0f, 0.4f, "%.2f");
+        ImGui::SliderInt("volumetric steps", &post.volumeSteps, 0, 20);
+        ImGui::Checkbox("Temporal anti-aliasing", &post.temporalAA);
+        ImGui::Checkbox("Screen-space reflections", &post.screenReflections);
+        const auto &renderStats = renderer.stats();
+        ImGui::Text("Local shadow maps: %u cached, %u updated", renderStats.cachedShadowFaces, renderStats.updatedShadowFaces);
+        ImGui::Text("Probes: %u   Decals: %u   Fog volumes: %u", renderStats.activeProbes, renderStats.activeDecals, renderStats.activeFogVolumes);
         ImGui::SliderFloat("exposure", &post.exposure, 0.1f, 4.0f, "%.2f");
         ImGui::SliderFloat("vignette", &post.vignette, 0.0f, 1.5f, "%.2f");
         ImGui::SliderFloat("grain", &post.grain, 0.0f, 0.1f, "%.3f");

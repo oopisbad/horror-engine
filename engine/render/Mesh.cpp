@@ -4,18 +4,27 @@
 
 #include <algorithm>
 #include <cmath>
+#include <limits>
+#include <stdexcept>
 #include <utility>
 
 namespace horror {
 
 Mesh::Mesh(Geometry geometry, std::string name)
     : vertices_(std::move(geometry.vertices))
-    , indices_(std::move(geometry.indices))
+
     , name_(name.empty() ? "mesh" : std::move(name))
 {
-    HOR_CHECK(!vertices_.empty());
-    HOR_CHECK(!indices_.empty());
-    upload();
+    if (vertices_.empty() || geometry.indices.empty()
+        || geometry.indices.size() > static_cast<size_t>(std::numeric_limits<GLsizei>::max()))
+        throw std::invalid_argument("Invalid mesh size");
+    const auto largestIndex = *std::max_element(geometry.indices.begin(), geometry.indices.end());
+    if (largestIndex >= vertices_.size())
+        throw std::invalid_argument("Mesh index outside vertex buffer");
+    indexCount_ = static_cast<GLsizei>(geometry.indices.size());
+    if (largestIndex <= std::numeric_limits<uint16_t>::max())
+        indexType_ = GL_UNSIGNED_SHORT;
+    upload(geometry.indices);
     computeBounds();
 }
 
@@ -31,7 +40,8 @@ Mesh::~Mesh()
 
 Mesh::Mesh(Mesh &&o) noexcept
     : vertices_(std::move(o.vertices_))
-    , indices_(std::move(o.indices_))
+    , indexCount_(o.indexCount_)
+    , indexType_(o.indexType_)
     , name_(std::move(o.name_))
     , vao_(o.vao_)
     , vbo_(o.vbo_)
@@ -53,7 +63,8 @@ Mesh &Mesh::operator=(Mesh &&o) noexcept
     if (vao_)
         glDeleteVertexArrays(1, &vao_);
     vertices_ = std::move(o.vertices_);
-    indices_ = std::move(o.indices_);
+    indexCount_ = o.indexCount_;
+    indexType_ = o.indexType_;
     name_ = std::move(o.name_);
     vao_ = o.vao_;
     vbo_ = o.vbo_;
@@ -64,12 +75,17 @@ Mesh &Mesh::operator=(Mesh &&o) noexcept
     return *this;
 }
 
-void Mesh::upload()
+void Mesh::upload(const std::vector<uint32_t> &indices)
 {
     glCreateBuffers(1, &vbo_);
     glNamedBufferStorage(vbo_, vertices_.size() * sizeof(Vertex), vertices_.data(), 0 /* immutable */);
     glCreateBuffers(1, &ebo_);
-    glNamedBufferStorage(ebo_, indices_.size() * sizeof(uint32_t), indices_.data(), 0);
+    if (indexType_ == GL_UNSIGNED_SHORT) {
+        const std::vector<uint16_t> compact(indices.begin(), indices.end());
+        glNamedBufferStorage(ebo_, compact.size() * sizeof(uint16_t), compact.data(), 0);
+    } else {
+        glNamedBufferStorage(ebo_, indices.size() * sizeof(uint32_t), indices.data(), 0);
+    }
 
     glCreateVertexArrays(1, &vao_);
     // Bind buffers upfront (DSA path); attributes reference them by offset.
@@ -96,12 +112,15 @@ void Mesh::upload()
     glEnableVertexArrayAttrib(vao_, 4);
     glVertexArrayAttribIFormat(vao_, 4, 4, GL_UNSIGNED_INT, offsetof(Vertex, joints));
     glVertexArrayAttribBinding(vao_, 4, 0);
+    glEnableVertexArrayAttrib(vao_, 6);
+    glVertexArrayAttribFormat(vao_, 6, 2, GL_FLOAT, GL_FALSE, offsetof(Vertex, lightmapUv));
+    glVertexArrayAttribBinding(vao_, 6, 0);
     // attribute 5: weights vec4 (sum normalized to 1 by the loader)
     glEnableVertexArrayAttrib(vao_, 5);
     glVertexArrayAttribFormat(vao_, 5, 4, GL_FLOAT, GL_FALSE, offsetof(Vertex, weights));
     glVertexArrayAttribBinding(vao_, 5, 0);
 
-    HOR_LOG_TRACE("mesh '{}' uploaded: {} verts, {} indices", name_, vertices_.size(), indices_.size());
+    HOR_LOG_TRACE("mesh '{}' uploaded: {} verts, {} indices", name_, vertices_.size(), indices.size());
 }
 
 void Mesh::computeBounds()

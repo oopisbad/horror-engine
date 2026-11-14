@@ -711,3 +711,124 @@ a fifth peer rejected, leave/rejoin, host shutdown and invalid address handling.
 --selftest retains the movement/animation regression checks.
 Validation: 29/29 gameplay checks, frontend lifecycle test, loopback lobby integration and menu screenshot inspection passed on Windows. No remote-machine or internet connectivity test has been performed.
 Quit opens a centered "Misclick?" confirmation: Keep playing cancels, Quit game closes the application and lobby sockets. Escape dismisses the confirmation.
+
+## Graphics update — 2026-11-13
+
+Launch normally for High quality. For a different preset or a reproducible
+benchmark, run these commands from the project folder:
+
+```powershell
+.\run-windows.bat --graphics balanced
+.\run-windows.bat --graphics fast
+.\run-windows.bat --benchmark --fullscreen --test-models --frames 4200
+```
+
+High renders the world at native resolution with 12 volumetric samples and HDR
+bloom. Balanced renders the world at 85% of each output dimension with 8
+volumetric samples and bloom. Fast renders at 75% with volumetric scattering and
+bloom disabled. The menu, UI, and final composite run at output resolution.
+Use O or `--debug-draw` for collider and light markers, and F1 for bloom and
+volumetric sample controls. The flashlight remains the shadow-casting light.
+
+The corridor uses a procedural mipmapped detail texture, GGX material lighting,
+sRGB decoding for base-color textures, and batched fixtures. The shadow pass
+tests its own frustum so off-camera casters can still cast visible shadows.
+The surface shader uses nine bilinear depth-comparison lookups in the flashlight
+cone. A quarter-resolution march estimates single scattering using the same
+shadow map, then a depth-aware reconstruction composites the haze. Bloom
+downsamples bright HDR pixels through four small buffers and blends them back
+up. The opaque scene and bloom use 32-bit floating-point RGB targets. The
+volume buffer retains RGBA16F because its alpha channel holds linear distance.
+
+The benchmark disables VSync, skips the first 120 frames, and reports frame
+time plus asynchronous GPU timestamps for shadows, geometry, effects, and
+compositing. RX 580 results at 1920×1080 with the corridor and two animated
+sample models, median of three 4,200-frame runs using GCC 16.2 with -O2:
+
+| Preset | Mean frame time | p95 frame time | Mean GPU renderer time |
+| --- | ---: | ---: | ---: |
+| High | 1.076 ms | 1.178 ms | about 0.90 ms |
+| Balanced | 0.902 ms | 0.996 ms | about 0.73 ms |
+| Fast | 0.602 ms | 0.685 ms | about 0.45 ms |
+
+These are measurements for this small test scene. Larger levels and more
+animated objects will have different costs. `-DHOR_GNU_O3=ON` applies -O3 to
+first-party optimized GCC builds. The median High frame time was 1.071 ms with
+-O3 versus 1.076 ms with -O2, so the default remains -O2. The bundled w64devkit
+GCC build reported that link-time optimization support was disabled.
+
+References:
+- Google's Filament material model: https://google.github.io/filament/main/filament.html
+- Ignacio Castaño on hardware PCF: https://www.ludicon.com/castano/blog/articles/shadow-mapping-summary-part-1/
+- Jorge Jimenez on multiscale bloom: https://www.iryoku.com/next-generation-post-processing-in-call-of-duty-advanced-warfare/
+- Khronos on nonblocking timer queries: https://wikis.khronos.org/opengl/Timer_Query
+- GCC optimization options: https://gcc.gnu.org/onlinedocs/gcc-16.1.0/gcc/Optimize-Options.html
+
+After locking the benchmark camera, one repeat per preset measured 1.157 ms
+High, 0.988 ms Balanced and 0.655 ms Fast. GPU totals remained about 0.91,
+0.73 and 0.45 ms respectively. A separate old-build comparison included process
+startup and enabled collider/light debug drawing on both builds. At fullscreen
+1080p with two animated models, median wall time for 4,200 frames was 4.765 s
+old, 6.518 s High and 4.522 s Fast. High trades additional frame time for the
+new visual effects. The results apply to this local sample scene.
+
+Additional reading on volumetric lighting:
+https://advances.realtimerendering.com/s2015/index.html
+
+## Imported level workflow
+
+Use run-import-lab.bat to play the reference level. Use run-windows.bat
+--level "path/to/room.glb" --play for your own level. See
+docs/BLENDER_EXPORT.md for node names, supported material features and authoring
+limits. --check-import-lab runs the focused physics checks with a hidden window.
+--level-tour follows authored camera markers and reports GPU timing. The
+reference uses a generated glTF scene and the existing CesiumMan sample.
+
+Imported collision uses continuous box sweeps against static triangles with a
+bounding-volume hierarchy. Props are translating boxes with gravity and floor
+friction. The level loader preserves nested transforms and supports rotated
+collision boxes. Static collision must be authored with COL_ or COL_MESH_ nodes.
+
+## Visual showcase
+
+Run run-visual-showcase.bat for the playable Import Lab at 1920x1080 with a
+60 FPS limit independent of VSync. Windows timer overhead can make this read
+about 59 FPS. Run `run-visual-showcase.bat --fps-cap 0 --vsync off` to remove
+both limits, or pass a different cap with `--fps-cap N`.
+docs/BLENDER_EXPORT.md describes Blender lightmaps, light shadow opt-in, box
+reflection probes, projected surface decals, and local fog.
+
+High draws up to two cached spot maps and one six-face point map, uses temporal
+anti-aliasing, and traces half-resolution screen reflections. Balanced keeps a
+single local spot shadow and temporal AA. Fast uses the flashlight shadow and
+baked/light-probe lighting with the heavier screen effects disabled.
+
+The shipped UV1 maps are generated offline from a simple one-bounce patch model.
+Use the Blender workflow for a full scene bake with occlusion. Static cubemap
+probes capture the level once, use box projection and roughness mip levels, and
+exclude animated objects. SSR adds visible-screen detail where a ray hits the
+depth buffer. Temporal AA reconstructs the jittered scene color onto a stable
+output grid before blending history. Reflections and volumetric fog trace from
+that same grid and apply the raster offset to depth and surface lookups.
+Screen reflections fade with surface roughness and uncertain ray hits.
+Filtered probes supply reflections on rougher materials.
+A fixed camera accumulates coverage at static edges even when a subpixel
+sample switches which side of the edge provides depth. Animated meshes and
+props skip history using the reactive surface flag.
+
+On the Radeon RX 580, a 300-frame High tour at 1920x1080 with the 60 FPS cap gave
+16.95 ms mean frame time, 17.25 ms p95, and about 5.64 ms average GPU render time
+over 180 measured frames. This is the Import Lab scene, not a large level.
+Separate capped runs used about 5.31 ms GPU on Balanced and 3.01 ms GPU on Fast.
+
+Validation command: run-windows.bat --check-visuals --frames 300 --w 1920 --h 1080 --fps-cap 60
+The check verifies authored effects, lightmap import, cache reuse and refresh,
+and effect budgets by preset. Use --no-taa, --no-ssr, and --no-local-shadows
+to isolate the corresponding effects. The launcher's FPS cap also accepts
+--fps-cap 0 for uncapped profiling.
+
+The fog marcher uses consistent sample positions to avoid a visible checker
+pattern. The render stability update reduced the share of pixels changing
+by at least 5 of 255 levels between fixed-camera frames from 3.11% to 0.74%
+in four 800x600 Import Lab captures. The final Windows build passed
+`--check-visuals` and the 29 gameplay self-tests.

@@ -23,6 +23,38 @@ uniform float uGrain;
 
 uniform vec3 uFogColor;
 uniform float uFogDensity;
+layout(binding=2) uniform sampler2D uBloom;
+layout(binding=7) uniform sampler2D uVolume;
+uniform float uBloomStrength;
+uniform int uHasVolume;
+layout(binding=12) uniform sampler2D uReflection;
+uniform int uHasReflections;
+uniform vec2 uRayScale;
+uniform vec2 uRasterOffset;
+
+// Bilateral reconstruction across depth edges keeps flashlight haze behind walls.
+vec3 upsampleDepthAware(sampler2D source, float distanceToScene)
+{
+    vec2 size = vec2(textureSize(source, 0));
+    vec2 p = vUv * size - 0.5;
+    ivec2 base = ivec2(floor(p));
+    vec2 f = fract(p);
+    vec3 total = vec3(0.0);
+    float totalWeight = 0.0;
+    for (int y = 0; y < 2; ++y) {
+        for (int x = 0; x < 2; ++x) {
+            vec4 sampleValue = texelFetch(source,
+                clamp(base + ivec2(x,y), ivec2(0), ivec2(size)-1), 0);
+            float delta = abs(distanceToScene - sampleValue.a);
+            float weight = (x == 0 ? 1.0-f.x : f.x) * (y == 0 ? 1.0-f.y : f.y);
+            float relative = delta / (0.08 + distanceToScene * 0.06);
+            weight /= 1.0 + relative * relative * relative;
+            total += sampleValue.rgb * weight;
+            totalWeight += weight;
+        }
+    }
+    return total / max(totalWeight, 0.04);
+}
 
 // Narkowicz's ACES filmic approximation: cheap, keeps highlight detail
 // instead of clipping the flashlight's inverse-square falloff to white.
@@ -39,7 +71,7 @@ vec3 acesToneMap(vec3 x)
 // Hash-based noise; deterministic per pixel/time, no texture needed.
 float hash(vec2 p)
 {
-    return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453123);
+    return fract(52.9829189 * fract(dot(p, vec2(0.06711056, 0.00583715))));
 }
 
 void main()
@@ -49,11 +81,20 @@ void main()
     // ---- depth fog ---------------------------------------------------------
     // Exponential-squared fog driven by the scene depth buffer: far walls and
     // the corridor end sink into black instead of a gray haze.
-    float depth = texture(uDepth, vUv).r;
+    float depth = texture(uDepth, vUv + uRasterOffset).r;
     float linearDepth = (2.0 * uNear * uFar)
         / (uFar + uNear - (depth * 2.0 - 1.0) * (uFar - uNear));
-    float fogAmount = 1.0 - exp(-pow(linearDepth * uFogDensity, 2.0));
-    color = mix(color, uFogColor, clamp(fogAmount, 0.0, 1.0));
+    vec2 slope = (vUv * 2.0 - 1.0) * uRayScale;
+    float distanceToScene = linearDepth * sqrt(1.0 + dot(slope, slope));
+    if (uHasReflections != 0)
+        color += upsampleDepthAware(uReflection, linearDepth);
+    float density = distanceToScene * uFogDensity;
+    float fogAmount = 1.0 - exp(-density * density);
+    color = mix(color, uFogColor, fogAmount);
+    if (uHasVolume != 0)
+        color += upsampleDepthAware(uVolume, distanceToScene);
+    if (uBloomStrength > 0.0)
+        color += texture(uBloom, vUv).rgb * uBloomStrength;
 
     // ---- exposure + tonemap ------------------------------------------------
     color *= uExposure;
@@ -74,7 +115,7 @@ void main()
     // Applied after gamma: a fixed linear amplitude would be amplified by the
     // encode in near-black areas and turn the shadows into TV static.
     // Luminance-weighted so highlights stay clean.
-    float noise = hash(vUv * vec2(1920.0, 1080.0) + fract(uTime) * 97.0) - 0.5;
+    float noise = hash(floor(gl_FragCoord.xy) + fract(uTime) * 97.0) - 0.5;
     float luma = dot(color, vec3(0.299, 0.587, 0.114));
     color += noise * uGrain * (1.0 - luma * 0.7);
 

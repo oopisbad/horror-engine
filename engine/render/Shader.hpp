@@ -8,6 +8,7 @@
 #include <filesystem>
 #include <string>
 #include <unordered_map>
+#include <string_view>
 #include <vector>
 
 namespace horror {
@@ -61,7 +62,7 @@ private:
     // failed hot reload leaves the previously working program running.
     [[nodiscard]] GLuint linkNewProgram(GLuint vert, GLuint frag) const;
     void reflectUniforms();
-    GLint uniformLocation(const std::string &name) const;
+    GLint uniformLocation(const char *name) const;
     // Loads + compiles both stages into a candidate; on success installs it.
     // Returns false without throwing on errors (hot reload must not kill the
     // process mid-edit).
@@ -77,7 +78,13 @@ private:
     std::vector<std::string> defines_;
     std::string lastError_;
     GLuint program_ = 0;
-    mutable std::unordered_map<std::string, GLint> uniformCache_;
+    struct UniformHash {
+        using is_transparent = void;
+        size_t operator()(std::string_view name) const noexcept {
+            return std::hash<std::string_view>{}(name);
+        }
+    };
+    mutable std::unordered_map<std::string, GLint, UniformHash, std::equal_to<>> uniformCache_;
 };
 
 } // namespace horror

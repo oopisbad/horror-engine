@@ -3,6 +3,7 @@
 #include <glm/glm.hpp>
 
 #include <cstdint>
+#include <stdexcept>
 
 #include "core/Log.hpp"
 
@@ -72,10 +73,13 @@ void Framebuffer::create()
 {
     glCreateFramebuffers(1, &fbo_);
 
-    if (kind_ == Kind::ColorDepth) {
+    if (kind_ != Kind::DepthOnly) {
         GLuint color = 0;
         glCreateTextures(GL_TEXTURE_2D, 1, &color);
-        glTextureStorage2D(color, 1, hdr_ ? GL_RGBA16F : GL_RGBA8,
+        // The scene and bloom need nonnegative HDR RGB. Only volume needs alpha.
+        const GLenum format = !hdr_ ? GL_RGBA8
+            : (kind_ == Kind::ColorAlpha ? GL_RGBA16F : GL_R11F_G11F_B10F);
+        glTextureStorage2D(color, 1, format,
             static_cast<GLsizei>(width_), static_cast<GLsizei>(height_));
         glTextureParameteri(color, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
         glTextureParameteri(color, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
@@ -87,7 +91,21 @@ void Framebuffer::create()
         glNamedFramebufferReadBuffer(fbo_, GL_COLOR_ATTACHMENT0);
     }
 
-    if (kind_ == Kind::DepthOnly || kind_ == Kind::ColorDepth) {
+    if (kind_ == Kind::Surface) {
+        GLuint surface = 0;
+        glCreateTextures(GL_TEXTURE_2D, 1, &surface);
+        glTextureStorage2D(surface, 1, GL_RGBA8, width_, height_);
+        glTextureParameteri(surface, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+        glTextureParameteri(surface, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+        glTextureParameteri(surface, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+        glTextureParameteri(surface, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+        colorTextures_.push_back(surface);
+        glNamedFramebufferTexture(fbo_, GL_COLOR_ATTACHMENT1, surface, 0);
+        constexpr GLenum attachments[] = {GL_COLOR_ATTACHMENT0, GL_COLOR_ATTACHMENT1};
+        glNamedFramebufferDrawBuffers(fbo_, 2, attachments);
+    }
+
+    if (kind_ == Kind::DepthOnly || kind_ == Kind::ColorDepth || kind_ == Kind::Surface) {
         // DEPTH_COMPONENT24 for the main frame; stencil left off for now.
         glCreateTextures(GL_TEXTURE_2D, 1, &depthTexture_);
         glTextureStorage2D(depthTexture_, 1, GL_DEPTH_COMPONENT24,
@@ -99,6 +117,10 @@ void Framebuffer::create()
         glNamedFramebufferTexture(fbo_, GL_DEPTH_ATTACHMENT, depthTexture_, 0);
     }
 
+    if (kind_ == Kind::ColorDepth || kind_ == Kind::Surface) {
+        glTextureParameteri(depthTexture_, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+        glTextureParameteri(depthTexture_, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+    }
     if (kind_ == Kind::DepthOnly) {
         // A depth-only FBO must explicitly disable color draw/read buffers;
         // otherwise the inherited default (COLOR_ATTACHMENT0, which has no
@@ -112,8 +134,9 @@ void Framebuffer::create()
     if (status != GL_FRAMEBUFFER_COMPLETE) {
         HOR_LOG_ERROR("framebuffer incomplete (status 0x{:x}, kind {}, {}x{})",
             static_cast<unsigned>(status), static_cast<int>(kind_), width_, height_);
+        destroy();
+        throw std::runtime_error("OpenGL framebuffer is incomplete");
     }
-    HOR_CHECK(status == GL_FRAMEBUFFER_COMPLETE);
 }
 
 void Framebuffer::resize(uint32_t width, uint32_t height)

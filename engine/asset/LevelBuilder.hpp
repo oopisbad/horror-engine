@@ -1,6 +1,7 @@
 #pragma once
 
 #include "scene/Components.hpp"
+#include "scene/Collision.hpp"
 
 #include <glm/glm.hpp>
 
@@ -20,7 +21,8 @@ struct LevelOptions {
     bool importLights = true;
     bool importSpawnPoints = true;
     bool importTriggers = true;
-    bool importCollision = true;   // COL_* nodes -> AABBCollider
+    bool importCollision = true;   // enable COL_ and COL_MESH_ markers
+    bool bakePhysics = false;     // static triangles and pushable PROP_ boxes
     bool importExtras = true;      // node extras -> EntityExtras
 };
 
@@ -29,18 +31,22 @@ struct LevelInstance {
     // alive for as long as the level lives. Hold on to this.
     std::shared_ptr<GltfModel> model;
 
+    std::unique_ptr<LevelPhysics> physics;
     EntityId root = kInvalidEntity;
     std::vector<EntityId> entities;     // every entity created, hierarchy included
     std::vector<EntityId> meshEntities;
     std::vector<EntityId> spawnPoints;
     std::vector<EntityId> triggers;
     std::vector<EntityId> lights;
+    size_t lightmappedMeshes = 0;
 };
 
 // Instantiates a loaded glTF scene into `scene` under a new root entity.
 //
 // Node name conventions (case-sensitive prefixes):
-//   COL_*      invisible collision geometry (mesh bounds -> AABBCollider)
+//   COL_*      invisible box collider from local mesh bounds
+//   COL_MESH_* invisible triangle collider when bakePhysics is enabled
+//   PROP_*     visible pushable box when bakePhysics is enabled
 //   SPAWN_*    spawn marker (SpawnPoint with the node's world facing)
 //   TRIGGER_*  trigger volume (world AABB in TriggerVolume)
 // Nodes with a mesh become MeshRenderer children (or SkinnedMeshRenderer +

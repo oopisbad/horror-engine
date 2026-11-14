@@ -9,8 +9,11 @@ layout(location = 2) in vec2 aUv;
 layout(location = 3) in vec4 aTangent;
 layout(location = 4) in uvec4 aJoints;
 layout(location = 5) in vec4 aWeights;
+layout(location = 6) in vec2 aLightmapUv;
 
 uniform mat4 uModel;
+uniform mat3 uNormalMatrix;
+uniform float uTangentSign;
 uniform mat4 uViewProj;
 uniform mat4 uLightViewProj;
 
@@ -29,6 +32,7 @@ layout(location = 2) out vec2 vUv;
 layout(location = 3) out vec4 vShadowPos;
 // World-space tangent; .w carries glTF's bitangent sign (+/-1).
 layout(location = 4) out vec4 vTangent;
+layout(location = 5) out vec2 vLightmapUv;
 
 void main()
 {
@@ -51,16 +55,16 @@ void main()
     // uModel is the entity/root transform on top of the (skinned) model space.
     vec4 world = uModel * vec4(localPos, 1.0);
     vWorldPos = world.xyz;
-    // Normal assumes uniform-ish scale; axis-stretching surfaces need a
-    // normal matrix (inverse transpose) later -- noted, not needed yet.
-    vNormal = normalize(mat3(uModel) * localNormal);
+    // Inverse transpose keeps normals perpendicular under nonuniform scale.
+    vNormal = normalize(uNormalMatrix * localNormal);
     // Procedural meshes leave the tangent at zero; keep it finite so the
     // fragment shader can detect "no tangent" (it only needs one when the
     // material has a normal map).
     vec3 worldTangent = mat3(uModel) * localTangent;
     vTangent = vec4(length(worldTangent) > 1e-6 ? normalize(worldTangent) : vec3(0.0),
-        aTangent.w != 0.0 ? aTangent.w : 1.0);
+        (aTangent.w != 0.0 ? aTangent.w : 1.0) * uTangentSign);
     vUv = aUv;
+    vLightmapUv = aLightmapUv;
     // Fragment shader divides by w; range-checking in sampleShadow eats the
     // outside-case, plus the 0..1 remap when sampling.
     vShadowPos = uLightViewProj * world;

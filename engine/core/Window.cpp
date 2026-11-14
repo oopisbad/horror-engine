@@ -51,6 +51,8 @@ Window::Window(Desc desc)
     // sRGB is deliberately NOT requested; tonemapping is a renderer decision.
     glfwWindowHint(GLFW_SRGB_CAPABLE, GLFW_TRUE);
 
+    glfwWindowHint(GLFW_VISIBLE, desc.visible ? GLFW_TRUE : GLFW_FALSE);
+    glfwWindowHint(GLFW_DECORATED, desc.visible ? GLFW_TRUE : GLFW_FALSE);
     GLFWmonitor *screen = desc.fullscreen ? glfwGetPrimaryMonitor() : nullptr;
     window_.reset(glfwCreateWindow(static_cast<int>(desc.width), static_cast<int>(desc.height),
         desc.title.data(), screen, nullptr));

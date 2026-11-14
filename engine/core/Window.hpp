@@ -27,6 +27,7 @@ public:
         int glMinor = 5;
         bool vsync = true;
         bool fullscreen = false; // true = windowed fullscreen on primary monitor
+        bool visible = true;
     };
 
     explicit Window(Desc desc);

@@ -19,6 +19,7 @@
 #include <fstream>
 #include <limits>
 #include <map>
+#include <string_view>
 #include <unordered_map>
 
 namespace horror {
@@ -447,27 +448,55 @@ void GltfModel::load()
     }
 
     const std::filesystem::path baseDir = assetDirectory(resolvedPath_);
-    result = cgltf_load_buffers(&options, data, baseDir.string().c_str());
+    const std::unique_ptr<cgltf_data, decltype(&cgltf_free)> owner(data, cgltf_free);
+    result = cgltf_load_buffers(&options, data, resolvedPath_.c_str());
     if (result != cgltf_result_success) {
         error_ = "cgltf_load_buffers failed";
-        cgltf_free(data);
         HOR_LOG_ERROR("glTF load failed: {} [{}]", error_, resolvedPath_);
         return;
     }
 
+    if (cgltf_validate(data) != cgltf_result_success) {
+        error_ = "glTF validation failed";
+        HOR_LOG_ERROR("{} [{}]", error_, resolvedPath_);
+        return;
+    }
+    for (cgltf_size i = 0; i < data->extensions_required_count; ++i) {
+        const std::string_view extension(data->extensions_required[i]);
+        if (extension == "KHR_lights_punctual" || extension == "KHR_materials_unlit"
+            || extension == "KHR_materials_emissive_strength")
+            continue;
+        error_ = "Unsupported required glTF extension: " + std::string(extension);
+        HOR_LOG_ERROR("{} [{}]", error_, resolvedPath_);
+        return;
+    }
+    std::vector<bool> collisionMesh(data->meshes_count);
+    for (cgltf_size i = 0; i < data->nodes_count; ++i) {
+        const auto &node = data->nodes[i];
+        if (node.mesh && node.name && std::string_view(node.name).starts_with("COL_MESH_"))
+            collisionMesh[static_cast<size_t>(node.mesh - data->meshes)] = true;
+    }
+
     // ---- materials + textures ---------------------------------------------
     // Deduplicate textures: several materials commonly share one image.
-    std::unordered_map<const cgltf_texture *, std::shared_ptr<Texture>> textureCache;
+    std::unordered_map<const cgltf_texture *, std::shared_ptr<Texture>> textureCache[2];
 
     auto loadTexture = [&](const cgltf_texture *tex, bool srgb) -> std::shared_ptr<Texture> {
         if (!tex || !tex->image)
             return nullptr;
-        auto it = textureCache.find(tex);
-        if (it != textureCache.end())
+        auto &cache = textureCache[srgb ? 1 : 0];
+        auto it = cache.find(tex);
+        if (it != cache.end())
             return it->second;
 
         Texture::Params params;
         params.srgb = srgb;
+        if (const auto *sampler = tex->sampler) {
+            if (sampler->mag_filter) params.magFilter = sampler->mag_filter;
+            if (sampler->min_filter) params.minFilter = sampler->min_filter;
+            params.wrapS = sampler->wrap_s;
+            params.wrapT = sampler->wrap_t;
+        }
         std::shared_ptr<Texture> texture;
         const cgltf_image *image = tex->image;
         if (image->buffer_view) {
@@ -484,14 +513,16 @@ void GltfModel::load()
                 else
                     HOR_LOG_WARN("glTF: undecodable data-URI image '{}'", image->name ? image->name : "");
             } else {
-                const std::string imagePath = (baseDir / uri).string();
+                std::string decoded = uri;
+                decoded.resize(cgltf_decode_uri(decoded.data()));
+                const std::string imagePath = (baseDir / decoded).string();
                 texture = std::make_shared<Texture>(imagePath, params);
             }
         }
         if (!texture)
             return nullptr;
         textures_.push_back(texture);
-        textureCache[tex] = texture;
+        cache[tex] = texture;
         return texture;
     };
 
@@ -500,31 +531,47 @@ void GltfModel::load()
         auto mat = std::make_shared<Material>();
         mat->name = safeName(src.name, "material" + std::to_string(i));
 
+        const auto map = [&](const cgltf_texture_view &view, bool srgb, const char *slot) -> Texture * {
+            if (!view.texture)
+                return nullptr;
+            if (view.texcoord != 0 || view.has_transform) {
+                HOR_LOG_WARN("glTF '{}' material '{}' {} map uses unsupported UV set or transform",
+                    path_, mat->name, slot);
+                return nullptr;
+            }
+            const auto texture = loadTexture(view.texture, srgb);
+            if (!texture || texture->isFallback())
+                HOR_LOG_WARN("glTF '{}' material '{}' {} image '{}' failed to load",
+                    path_, mat->name, slot, view.texture->image
+                        ? safeName(view.texture->image->uri, safeName(view.texture->image->name, "embedded"))
+                        : std::string("missing or unsupported"));
+            return texture.get();
+        };
+        mat->metallic = 1.0f;
+        mat->roughness = 1.0f;
+        mat->albedo = glm::vec3(1.0f);
         if (src.has_pbr_metallic_roughness) {
             const cgltf_pbr_metallic_roughness &pbr = src.pbr_metallic_roughness;
             mat->albedo = glm::vec3(pbr.base_color_factor[0], pbr.base_color_factor[1], pbr.base_color_factor[2]);
             mat->metallic = pbr.metallic_factor;
             mat->roughness = std::clamp(pbr.roughness_factor, 0.04f, 1.0f);
-            if (pbr.base_color_texture.texture) {
-                if (pbr.base_color_texture.texcoord != 0)
-                    HOR_LOG_WARN_ONCE("glTF material '{}' uses TEXCOORD_{}; only uv0 is supported",
-                        mat->name, pbr.base_color_texture.texcoord);
-                mat->baseColorTex = loadTexture(pbr.base_color_texture.texture, true).get();
-            }
-            if (pbr.metallic_roughness_texture.texture)
-                mat->metallicRoughnessTex =
-                    loadTexture(pbr.metallic_roughness_texture.texture, false).get();
+            mat->opacity = pbr.base_color_factor[3];
+            mat->baseColorTex = map(pbr.base_color_texture, true, "base color");
+            mat->metallicRoughnessTex = map(pbr.metallic_roughness_texture, false, "metallic roughness");
         }
-        if (src.normal_texture.texture)
-            mat->normalTex = loadTexture(src.normal_texture.texture, false).get();
-
-        // Emissive: the forward shader has a scalar strength; keep the color
-        // for a future PBR pass and drive strength from the brightest channel.
+        mat->normalTex = map(src.normal_texture, false, "normal");
+        mat->normalScale = src.normal_texture.scale;
+        mat->occlusionTex = map(src.occlusion_texture, false, "occlusion");
+        mat->occlusionStrength = src.occlusion_texture.scale;
+        mat->emissiveTex = map(src.emissive_texture, true, "emissive");
         mat->emissiveColor = glm::vec3(src.emissive_factor[0], src.emissive_factor[1], src.emissive_factor[2]);
-        mat->emissiveStrength = std::max({ mat->emissiveColor.r, mat->emissiveColor.g, mat->emissiveColor.b });
-        // Alpha modes other than OPAQUE need sorting/blending support; the
-        // loader keeps the material opaque rather than rendering it wrong.
-        mat->opacity = 1.0f;
+        mat->emissiveStrength = src.has_emissive_strength ? src.emissive_strength.emissive_strength : 1.0f;
+        mat->doubleSided = src.double_sided;
+        mat->unlit = src.unlit;
+        if (src.alpha_mode == cgltf_alpha_mode_mask)
+            mat->alphaCutoff = src.alpha_cutoff;
+        else if (src.alpha_mode == cgltf_alpha_mode_blend)
+            HOR_LOG_WARN("glTF '{}' material '{}': alpha BLEND renders opaque; use MASK for cutouts", path_, mat->name);
 
         materials_.push_back(std::move(mat));
     }
@@ -572,12 +619,15 @@ void GltfModel::load()
             const cgltf_accessor *nrm = nullptr;
             const cgltf_accessor *uv = nullptr;
             const cgltf_accessor *tan = nullptr;
+            const cgltf_accessor *uv1 = nullptr;
             const cgltf_accessor *joints = nullptr;
             const cgltf_accessor *weights = nullptr;
             if (const auto *a = findAttribute(prim, cgltf_attribute_type_normal))
                 nrm = a->data;
             if (const auto *a = findAttribute(prim, cgltf_attribute_type_texcoord))
                 uv = a->data;
+            if (const auto *a = findAttribute(prim, cgltf_attribute_type_texcoord, 1))
+                uv1 = a->data;
             if (const auto *a = findAttribute(prim, cgltf_attribute_type_tangent))
                 tan = a->data;
             if (const auto *a = findAttribute(prim, cgltf_attribute_type_joints))
@@ -596,6 +646,11 @@ void GltfModel::load()
                     cgltf_float t[2] = { 0, 0 };
                     cgltf_accessor_read_float(uv, v, t, 2);
                     vertex.uv = glm::vec2(t[0], t[1]);
+                }
+                if (uv1) {
+                    cgltf_float coords[2]{};
+                    cgltf_accessor_read_float(uv1, v, coords, 2);
+                    vertex.lightmapUv = {coords[0], coords[1]};
                 }
                 if (tan) {
                     cgltf_float t[4] = { 1, 0, 0, 1 };
@@ -630,6 +685,15 @@ void GltfModel::load()
                     geometry.indices[k] = static_cast<uint32_t>(k);
             }
 
+            if (geometry.indices.empty() || geometry.indices.size() % 3 != 0
+                || std::any_of(geometry.indices.begin(), geometry.indices.end(),
+                    [&](uint32_t index) { return index >= geometry.vertices.size(); })) {
+                HOR_LOG_WARN("glTF '{}' mesh '{}' primitive {} has invalid triangle indices", path_, mesh.name, pi);
+                continue;
+            }
+            GltfMeshPart part;
+            if (collisionMesh[mi])
+                part.collisionIndices = geometry.indices;
             if (!nrm)
                 generateNormals(geometry.vertices, geometry.indices);
             if (!tan)
@@ -645,8 +709,8 @@ void GltfModel::load()
                 boundsMax_ = glm::max(boundsMax_, gpuMesh->maxBounds());
             }
 
-            GltfMeshPart part;
             part.mesh = std::move(gpuMesh);
+            part.hasLightmapUv = uv1 != nullptr;
             part.material = indexOf(data->materials, prim.material);
             if (part.material < 0)
                 part.material = defaultMaterial;
@@ -857,7 +921,6 @@ void GltfModel::load()
     }
 
     valid_ = true;
-    cgltf_free(data);
 
     HOR_LOG_INFO("glTF loaded: '{}' | {} nodes, {} meshes, {} materials, {} skins, {} clips, {} lights",
         path_, nodes_.size(), meshes_.size(), materials_.size(), skeletons_.size(),

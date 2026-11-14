@@ -23,6 +23,7 @@ struct Vertex {
     glm::vec4 tangent{1.0f, 0.0f, 0.0f, 1.0f};
     glm::uvec4 joints{0u};
     glm::vec4 weights{0.0f};
+    glm::vec2 lightmapUv{0.0f};
 };
 
 // A named GPU mesh: interleaved VBO + element indices in one VAO.
@@ -47,7 +48,8 @@ public:
 
     bool valid() const { return vao_ != 0; }
     GLuint handle() const { return vao_; }
-    GLsizei indexCount() const { return static_cast<GLsizei>(indices_.size()); }
+    GLsizei indexCount() const { return indexCount_; }
+    GLenum indexType() const { return indexType_; }
     const std::string &name() const { return name_; }
 
     // Exact local-space bounds; used by the collider debugger & culling.
@@ -73,7 +75,8 @@ public:
 
 private:
     std::vector<Vertex> vertices_;
-    std::vector<uint32_t> indices_;
+    GLsizei indexCount_ = 0;
+    GLenum indexType_ = GL_UNSIGNED_INT;
     std::string name_ = "mesh";
     GLuint vao_ = 0;
     GLuint vbo_ = 0;
@@ -81,7 +84,7 @@ private:
     glm::vec3 minBounds_{0.0f};
     glm::vec3 maxBounds_{0.0f};
 
-    void upload();
+    void upload(const std::vector<uint32_t> &indices);
     void computeBounds();
 };
 

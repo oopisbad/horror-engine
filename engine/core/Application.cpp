@@ -6,17 +6,78 @@
 #include "render/Framebuffer.hpp"
 
 #include <algorithm>
+#include <thread>
+#include <chrono>
+#ifdef _WIN32
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <windows.h>
+#endif
 #include <cstdio>
 #include <cstring>
 #include <vector>
 
 namespace horror {
+namespace {
+
+class FramePacer {
+public:
+    explicit FramePacer(unsigned rate) : period_(rate ? 1.0 / rate : 0.0) {
+#ifdef _WIN32
+        if (rate) {
+            // High-resolution waitable timer is local to this process. If the
+            // Windows build does not support the flag, keep portable pacing.
+            constexpr DWORD highResolution = 0x00000002;
+            timer_ = CreateWaitableTimerExW(nullptr, nullptr, highResolution,
+                TIMER_MODIFY_STATE | SYNCHRONIZE);
+        }
+#endif
+    }
+    ~FramePacer() {
+#ifdef _WIN32
+        if (timer_) CloseHandle(timer_);
+#endif
+    }
+
+    void wait(std::chrono::steady_clock::time_point start) const {
+        if (period_.count() <= 0.0)
+            return;
+        const auto deadline = start + period_;
+        const auto remaining = deadline - std::chrono::steady_clock::now();
+        if (remaining.count() <= 0.0)
+            return;
+#ifdef _WIN32
+        if (timer_) {
+            using Tick = std::chrono::duration<int64_t, std::ratio<1, 10000000>>;
+            LARGE_INTEGER due{};
+            due.QuadPart = -std::max<int64_t>(1, std::chrono::duration_cast<Tick>(remaining).count());
+            if (SetWaitableTimer(timer_, &due, 0, nullptr, nullptr, FALSE)) {
+                if (WaitForSingleObject(timer_, INFINITE) == WAIT_OBJECT_0)
+                    return;
+            }
+        }
+#endif
+        std::this_thread::sleep_until(deadline);
+    }
+
+private:
+    std::chrono::duration<double> period_;
+#ifdef _WIN32
+    HANDLE timer_ = nullptr;
+#endif
+};
+
+} // namespace
 
 Application::Application(Config config)
     : config_(config)
     , window_(Window::Desc{
           config_.windowTitle, config_.windowWidth, config_.windowHeight,
-          4, 5, config_.vsync, config_.fullscreen })
+          4, 5, config_.vsync, config_.fullscreen, config_.visible })
     , renderer_(config_.shadowMapSize)
     , imgui_(std::make_unique<ImGuiOverlay>())
     , logic_(config_.fixedStepSeconds)
@@ -46,7 +107,10 @@ int Application::run()
     scene_.updateWorldMatrices();
     scene_.refreshColliderBounds();
 
+    const FramePacer pacer(config_.frameRateLimit);
+    float nextShaderCheck = 0.0f;
     while (running_ && !window_.shouldClose()) {
+        const auto frameStart = std::chrono::steady_clock::now();
         const float frameDt = frameTimer_.tickRealtime();
         elapsed_ += frameDt;
         // Edge state rolls BEFORE new events arrive (pressed/released compare
@@ -95,13 +159,19 @@ int Application::run()
         // playback stays smooth; gameplay decides what to play per frame.
         if (simulationEnabled) AnimationSystem::update(scene_, frameDt);
 
-        scene_.updateWorldMatrices();
-        scene_.refreshColliderBounds();
-        camera_.update(window_.aspect());
-        renderer_.setWireframe(renderer_.wireframe());
-        renderer_.setDebugDrawEnabled(renderer_.debugDrawEnabled());
-        renderer_.setTime(elapsed_);
-        renderer_.render(scene_, camera_);
+        if (worldVisible) {
+            scene_.updateWorldMatrices();
+            scene_.refreshColliderBounds();
+            camera_.update(window_.aspect());
+            renderer_.setTime(elapsed_);
+            renderer_.render(scene_, camera_);
+        } else {
+            renderer_.resetHistory();
+            Framebuffer::bindDefault();
+            glViewport(0, 0, window_.frameWidth(), window_.frameHeight());
+            const GLfloat black[4] = {0, 0, 0, 1};
+            glClearBufferfv(GL_COLOR, 0, black);
+        }
 
         imgui_->renderPass();
         if (!screenshotPath_.empty()) {
@@ -110,11 +180,15 @@ int Application::run()
         }
 
         window_.swapBuffers();
-        renderer_.tickShaderReloads();
+        if (elapsed_ >= nextShaderCheck) {
+            renderer_.tickShaderReloads();
+            nextShaderCheck = elapsed_ + 0.25f;
+        }
 
         ++framesRun_;
         if (frameLimit_ > 0 && framesRun_ >= frameLimit_)
             break;
+        pacer.wait(frameStart);
     }
     return exitCode_;
 }
@@ -156,19 +230,17 @@ void Application::takeScreenshot(const std::string &path)
     // Flip-Y correction for OpenGL's bottom-up framebuffer; raw 8-bit read
     // (gamma in the default framebuffer may differ per driver; verified
     // visually rather than pixel-perfect).
-    glFlush();
-    int32_t x = 0, y = 0, w = 0, h = 0;
-    // use viewport from the last render
-    // Screenshot reads the default framebuffer. The last bound pass may have
-    // left the shadow-map viewport active, so reset explicitly to the window.
     Framebuffer::bindDefault();
-    glFlush();
-    w = static_cast<int32_t>(window_.frameWidth());
-    h = static_cast<int32_t>(window_.frameHeight());
-    x = 0;
-    y = 0;
+    const auto w = static_cast<int32_t>(window_.frameWidth());
+    const auto h = static_cast<int32_t>(window_.frameHeight());
+    if (w <= 0 || h <= 0 || w > 65535 || h > 65535)
+        return;
     std::vector<uint8_t> pixels(static_cast<size_t>(w) * h * 3);
-    glReadPixels(x, y, w, h, GL_RGB, GL_UNSIGNED_BYTE, pixels.data());
+    GLint previousPackAlignment = 0;
+    glGetIntegerv(GL_PACK_ALIGNMENT, &previousPackAlignment);
+    glPixelStorei(GL_PACK_ALIGNMENT, 1);
+    glReadPixels(0, 0, w, h, GL_BGR, GL_UNSIGNED_BYTE, pixels.data());
+    glPixelStorei(GL_PACK_ALIGNMENT, previousPackAlignment);
     if (pixels.empty()) {
         HOR_LOG_WARN("screenshot capture failed (zero-size buffer)");
         return;

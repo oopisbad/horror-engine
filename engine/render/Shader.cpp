@@ -250,12 +250,12 @@ void Shader::bind() const
     glUseProgram(program_);
 }
 
-GLint Shader::uniformLocation(const std::string &name) const
+GLint Shader::uniformLocation(const char *name) const
 {
     auto it = uniformCache_.find(name);
     if (it != uniformCache_.end())
         return it->second;
-    GLint loc = program_ ? glGetUniformLocation(program_, name.c_str()) : -1;
+    GLint loc = program_ ? glGetUniformLocation(program_, name) : -1;
     if (loc < 0)
         HOR_LOG_WARN_ONCE("uniform '{}' not found in shader [{}] (optimized out?)", name, name_);
     uniformCache_[name] = loc; // caches -1 too: avoids re-querying per call

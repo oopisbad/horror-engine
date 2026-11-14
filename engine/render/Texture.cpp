@@ -4,6 +4,8 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstring>
+#include <limits>
 
 #define STB_IMAGE_IMPLEMENTATION
 #define STBI_ASSERT(x) HOR_ASSERT(x)
@@ -22,9 +24,10 @@ Texture::Texture(const std::string &path, const Params &params)
         glTextureSubImage2D(texture_, 0, 0, 0, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, magenta);
         width_ = height_ = 1;
         srgb_ = false;
+        fallback_ = true;
         return;
     }
-    *this = Texture(GL_RGBA8, static_cast<uint32_t>(w), static_cast<uint32_t>(h), 1,
+    *this = Texture(params.srgb ? GL_SRGB8_ALPHA8 : GL_RGBA8, static_cast<uint32_t>(w), static_cast<uint32_t>(h), 1,
         GL_RGBA, GL_UNSIGNED_BYTE, pixels, params);
     stbi_image_free(pixels);
     srgb_ = params.srgb;
@@ -33,13 +36,14 @@ Texture::Texture(const std::string &path, const Params &params)
 Texture::Texture(const uint8_t *encoded, size_t size, const Params &params)
 {
     int w = 0, h = 0, channels = 0;
-    if (!encoded || size == 0) {
+    if (!encoded || size == 0 || size > static_cast<size_t>(std::numeric_limits<int>::max())) {
         HOR_LOG_WARN_ONCE("embedded texture has no data -- using placeholder");
         *this = Texture(GL_RGBA8, 1, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, nullptr, params);
         const uint8_t magenta[4] = { 255, 0, 255, 255 };
         glTextureSubImage2D(texture_, 0, 0, 0, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, magenta);
         width_ = height_ = 1;
         srgb_ = false;
+        fallback_ = true;
         return;
     }
     stbi_uc *pixels = stbi_load_from_memory(encoded, static_cast<int>(size), &w, &h, &channels, 4);
@@ -51,9 +55,10 @@ Texture::Texture(const uint8_t *encoded, size_t size, const Params &params)
         glTextureSubImage2D(texture_, 0, 0, 0, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, magenta);
         width_ = height_ = 1;
         srgb_ = false;
+        fallback_ = true;
         return;
     }
-    *this = Texture(GL_RGBA8, static_cast<uint32_t>(w), static_cast<uint32_t>(h), 1,
+    *this = Texture(params.srgb ? GL_SRGB8_ALPHA8 : GL_RGBA8, static_cast<uint32_t>(w), static_cast<uint32_t>(h), 1,
         GL_RGBA, GL_UNSIGNED_BYTE, pixels, params);
     stbi_image_free(pixels);
     srgb_ = params.srgb;
@@ -79,8 +84,27 @@ Texture::Texture(GLenum internalFormat, uint32_t width, uint32_t height, uint32_
         glTextureSubImage2D(texture_, 0, 0, 0, static_cast<GLsizei>(width),
             static_cast<GLsizei>(height), format, type, data);
     applyParams(params);
-    if (levels > 1)
+    if (levels > 1) {
         glGenerateTextureMipmap(texture_);
+        if (params.minFilter == GL_LINEAR_MIPMAP_LINEAR && params.magFilter == GL_LINEAR) {
+            static const float anisotropy = [] {
+                GLint count = 0;
+                glGetIntegerv(GL_NUM_EXTENSIONS, &count);
+                for (GLint i = 0; i < count; ++i) {
+                    const auto *name = reinterpret_cast<const char *>(glGetStringi(GL_EXTENSIONS, i));
+                    if (std::strcmp(name, "GL_EXT_texture_filter_anisotropic") == 0
+                        || std::strcmp(name, "GL_ARB_texture_filter_anisotropic") == 0) {
+                        float limit = 1.0f;
+                        glGetFloatv(GL_MAX_TEXTURE_MAX_ANISOTROPY, &limit);
+                        return std::min(8.0f, limit);
+                    }
+                }
+                return 1.0f;
+            }();
+            if (anisotropy > 1.0f)
+                glTextureParameterf(texture_, GL_TEXTURE_MAX_ANISOTROPY, anisotropy);
+        }
+    }
 }
 
 Texture::~Texture()
@@ -90,7 +114,7 @@ Texture::~Texture()
 }
 
 Texture::Texture(Texture &&o) noexcept
-    : texture_(o.texture_), width_(o.width_), height_(o.height_), depth_(o.depth_), srgb_(o.srgb_)
+    : texture_(o.texture_), width_(o.width_), height_(o.height_), depth_(o.depth_), srgb_(o.srgb_), fallback_(o.fallback_)
 {
     o.texture_ = 0;
 }
@@ -106,6 +130,7 @@ Texture &Texture::operator=(Texture &&o) noexcept
     height_ = o.height_;
     depth_ = o.depth_;
     srgb_ = o.srgb_;
+    fallback_ = o.fallback_;
     o.texture_ = 0;
     return *this;
 }

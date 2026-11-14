@@ -4,6 +4,8 @@
 
 namespace horror {
 
+class LevelPhysics;
+
 class Scene;
 class Input;
 class Camera;
@@ -13,18 +15,16 @@ class Camera;
 // stable). Named ...System to avoid colliding with the CharacterController
 // *component* in Components.hpp.
 //
-// Movement model: capsule-feet approximation. The player body is an AABB
-// standing on the transform's foot point; the camera is authored at feet +
-// (eyeHeight + bob). Collisions are axis-resolved AABB sweeps against the
-// scene's static AABBCollider boxes -- simple and stable for a corridor
-// horror game; replace with a full physics library (Bullet/Jolt) before we
-// need ragdolls, moving platforms, or fancy penetration resolution.
+// The player uses a feet-anchored AABB. The procedural corridor uses axis
+// resolution against boxes. Imported levels sweep the same shape through a
+// static triangle hierarchy and translating props.
 class CharacterSystem {
 public:
     struct Hooks {
         Camera *camera = nullptr; // camera to drive (yaw/pitch/bob/eye pos)
         Input *input = nullptr;
         bool logSteps = false;    // --debug-input: one trace line per fixed step
+        LevelPhysics *levelPhysics = nullptr;
     };
 
     // One fixed step. Reads input, integrates + resolves the entity's world

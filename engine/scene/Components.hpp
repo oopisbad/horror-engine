@@ -87,7 +87,7 @@ struct PointLight {
     float intensity = 10.0f;
     float radius = 0.35f;     // gizmo radius in debug draw
     float range = 8.0f;       // distance falloff bound
-    bool castShadow = false;  // stub for later; only the flashlight casts now
+    bool castShadow = false; // opt-in omnidirectional map
 };
 
 // Spot light (the flashlight). Attached to the camera transform by gameplay;
@@ -104,7 +104,7 @@ struct SpotLight {
     float range = 40.0f;
     bool castsShadows = true;
 
-    // Runtime state the renderer manages for its shadow map; not authored data.
+    // Per-light resolution hint for local spotlights.
     uint32_t shadowMapSize = 1024;
 };
 

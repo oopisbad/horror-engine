@@ -1,6 +1,6 @@
 # Blender → glTF 2.0 export guide
 
-The engine consumes **glTF 2.0 binary (`.glb`)** only. The loader supports
+Use **glTF 2.0 binary (`.glb`)** for a self-contained export. Text `.gltf` also loads with its relative buffers and images. The loader supports
 meshes, materials + textures, node hierarchies, skins, animation clips and
 `KHR_lights_punctual`, plus the level conventions below.
 
@@ -52,7 +52,9 @@ intended shading.
 
 | Prefix | Meaning |
 | --- | --- |
-| `COL_` | Invisible collision geometry. The node's mesh bounds become an `AABBCollider`; nothing is rendered. |
+| `COL_` | Invisible box from the mesh bounds. The level loader bakes its full transform, including rotation. |
+| `COL_MESH_` | Invisible static triangle collision. Use a simplified mesh for ramps, curved surfaces, and irregular walls. |
+| `PROP_` | Visible pushable box. The mesh bounds define its world-aligned body. |
 | `SPAWN_` | Spawn marker. Becomes a `SpawnPoint`; the suffix is the tag (`SPAWN_player`). The node's −Z is the facing direction. |
 | `TRIGGER_` | Trigger volume. The node's world-space mesh bounds become a `TriggerVolume`; the suffix is the tag. |
 
@@ -87,3 +89,85 @@ skinning inverse cancels that transform exactly once.
 `Animator::onEvent` fires them while the clip plays, including across loop
 wraps. Add `AnimationClip::events` manually in code if authoring JSON extras in
 Blender is inconvenient.
+
+## Play an imported level
+
+From the goreX folder, run:
+
+```powershell
+.\run-windows.bat --level "C:\path\to\room.glb" --play
+.\run-import-lab.bat
+```
+
+Keep your visible meshes and collision proxies separate. Add a `SPAWN_player`
+empty with its origin just above the floor and local -Z pointing into the room.
+The import lab includes stairs, a sloped ramp, a low beam, two crates, a thin
+divider, an alpha-cutout grille, and the CesiumMan animation sample. Use
+Ctrl or C to pass the low beam. Walk into the crates to push them.
+
+Collision is authored. Give the player floor and wall proxies and keep spawn
+points and props clear of overlapping geometry. Use static collision for
+ramps and stairs with risers below 0.31 m. Slopes up to about 45 degrees are
+walkable. Pushable props translate with gravity and friction. They use
+axis-aligned boxes, so they suit crates better than objects that need to
+roll, rotate, stack tightly, or follow a moving platform.
+
+Imported materials support UV0, base color, metallic/roughness, scaled normal
+maps, occlusion, emissive maps and strength, unlit, double-sided surfaces,
+and alpha MASK with matching shadow cutouts. BLEND is reported and displays
+opaque. The renderer supports up to eight point lights and four local
+spotlights, plus the player flashlight. The local shadow budgets are listed below.
+Unsupported required glTF extensions fail with a diagnostic. Use PNG or JPEG
+images and avoid UV transforms, mesh compression, and morph targets for now.
+Skinned animation uses four joint influences per vertex and up to 128 joints.
+
+For a moving render benchmark, place two or more `SPAWN_camera_00`,
+`SPAWN_camera_01`, etc. markers along a clear camera path. The renderer follows
+these markers in name order while recording frame and GPU pass timings.
+
+```powershell
+.\run-windows.bat --import-lab --level-tour --frames 1200 --graphics balanced
+.\run-windows.bat --check-import-lab
+```
+
+The import lab can be regenerated with `python -B scripts/make-import-lab.py`.
+Material semantics follow the [glTF 2.0 specification](https://registry.khronos.org/glTF/specs/2.0/glTF-2.0.html#materials).
+
+## Lighting for authored levels
+
+Enable Custom Properties in the glTF exporter. The engine reads these object
+properties from the exported node extras. Marker objects can be empties. Rotate
+and scale the empty to position its box. Its local cube from -0.5 to +0.5
+gives the effect volume. For example, scale (6, 0.6, 8) makes a low mist layer.
+
+| On the Blender object | Properties and behavior |
+| --- | --- |
+| Point or spot light | Boolean `cast_shadow`. High budgets two spots and one point (six cube faces). Balanced budgets one spot. The flashlight has its own map. |
+| Static mesh | String `lightmap`, a PNG path beside or relative to the GLB. Float `lightmap_strength`, default 1. The mesh must export `TEXCOORD_1`. |
+| Wet mesh | Float `wetness` from 0 to 1. Lowers roughness and deepens the base color. |
+| `PROBE_*` empty | Float `strength`, default 1. Captures a static cubemap from the marker origin. The oriented box controls its influence and parallax correction. |
+| `DECAL_GRIME_*`, `DECAL_LEAK_*`, `DECAL_SCUFF_*` | Floats `strength` and `wetness` from 0 to 1, plus `color_r`, `color_g`, `color_b` in linear space. The marker's +Z faces away from the receiving surface. |
+| `FOG_*` empty | Float `density` and linear `color_r`, `color_g`, `color_b`. Rotate and scale the empty to fit the room or floor layer. |
+
+For a Blender lightmap, unwrap a second nonoverlapping UV layer with padded
+islands. Make it the UV used for the Cycles bake and keep it second in the
+exported UV order. Bake the **Diffuse** pass with **Indirect** enabled and
+**Direct** and **Color** disabled. Save the active image as an sRGB PNG
+without applying a display look, then set the mesh object's `lightmap`
+property to that filename. The runtime adds baked irradiance to diffuse
+lighting and tints it with the material base color. Export the GLB and
+keep the PNG beside it. Use separate images where meshes overlap in UV1.
+[Cycles render baking documentation](https://docs.blender.org/manual/en/5.0/render/cycles/baking.html)
+
+The renderer considers up to two reflection probes, twelve decals, and four
+fog boxes nearest the camera. Probes capture static geometry and direct
+lighting once per load or probe move. They skip moving props, characters,
+and the player flashlight. High adds half-resolution screen reflections to
+wet or metallic surfaces. These fade at the edge of the screen and leave the
+local probe contribution visible. Fog boxes approximate tinted scattering
+and are clipped against scene depth.
+
+Run `run-visual-showcase.bat` for the visual lab with a 60 FPS cap. For a moving
+tour, use `run-import-lab.bat --level-tour --fps-cap 60`. The F1 overlay has
+temporal anti-aliasing and screen reflection toggles, plus shadow cache counts.
+The CLI also accepts `--no-taa`, `--no-ssr`, and `--no-local-shadows`.

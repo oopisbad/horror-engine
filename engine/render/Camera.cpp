@@ -44,7 +44,7 @@ void Camera::update(float aspect)
 {
     clampPitch();
 
-    glm::vec3 eye = position + bobOffset;
+    const glm::vec3 eye = position;
 
     glm::vec3 f = forward();
     glm::vec3 r = right();

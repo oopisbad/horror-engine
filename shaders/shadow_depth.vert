@@ -1,7 +1,9 @@
 #version 450 core
 
 layout(location = 0) in vec3 aPosition;
-layout(location = 3) in vec4 aTangent;
+layout(location = 2) in vec2 aUv;
+layout(location = 0) out vec2 vUv;
+layout(location = 1) out vec3 vWorld;
 layout(location = 4) in uvec4 aJoints;
 layout(location = 5) in vec4 aWeights;
 
@@ -28,5 +30,8 @@ void main()
               + aWeights.w * uBones[aJoints.w];
     localPos = (skin * vec4(aPosition, 1.0)).xyz;
 #endif
-    gl_Position = uLightViewProj * uModel * vec4(localPos, 1.0);
+    vUv = aUv;
+    vec4 world = uModel * vec4(localPos, 1.0);
+    vWorld = world.xyz;
+    gl_Position = uLightViewProj * world;
 }

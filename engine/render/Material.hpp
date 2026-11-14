@@ -36,8 +36,21 @@ struct Material {
     glm::vec3 emissiveColor{1.0f};
 
     float opacity = 1.0f;
-    // Non-owning; textures are owned by the GltfModel that created them.
+    float wetness = 0.0f;
+    float lightmapStrength = 1.0f;
+    const Texture *lightmap = nullptr; // optional baked indirect irradiance in UV1
+    float alphaCutoff = -1.0f;
+    float normalScale = 1.0f;
+    float occlusionStrength = 1.0f;
+    bool doubleSided = false;
+    bool unlit = false;
+    // Optional tiling detail with world-space coordinates for procedural geometry.
+    float detailScale = 0.0f;
+    Texture *detailTex = nullptr;
+    // Non-owning; textures are owned by the scene or the imported model.
     Texture *baseColorTex = nullptr;         // sRGB
+    Texture *emissiveTex = nullptr;
+    Texture *occlusionTex = nullptr;
     Texture *normalTex = nullptr;            // linear, tangent space (OpenGL +Y)
     Texture *metallicRoughnessTex = nullptr; // linear, G=roughness B=metallic
 };
