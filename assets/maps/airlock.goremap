@@ -1,0 +1,51 @@
+{
+  "version": 1,
+  "id": "4cb3ff10d0a44c9fa8346f28dc4f0e0b",
+  "objects": [
+    {
+      "id": "0616fb966c7347feb4eda94ebfc30c62",
+      "kind": "model",
+      "name": "Import Lab",
+      "position": [
+        0,
+        0,
+        0
+      ],
+      "scale": [
+        1,
+        1,
+        1
+      ],
+      "yaw": 0.0,
+      "notes": [],
+      "asset": "../test/import-lab.glb"
+    },
+    {
+      "id": "777b7f0f447a46b48b3c19a63423e285",
+      "kind": "trigger",
+      "name": "Airlock threshold",
+      "position": [
+        0,
+        0.95,
+        -11.25
+      ],
+      "scale": [
+        2.2,
+        1.9,
+        0.5
+      ],
+      "yaw": 0.0,
+      "notes": [
+        {
+          "id": "31a0af98029f4c778590fc3af6a4b0b8",
+          "local": [
+            0,
+            0,
+            0.5
+          ],
+          "logic": "When the last living player crosses this threshold, seal the airlock. Wait until both pressure switches stay active for three consecutive seconds before unlocking the exit. Leaving and re-entering must not start a second countdown."
+        }
+      ]
+    }
+  ]
+}
