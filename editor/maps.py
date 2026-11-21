@@ -7,6 +7,8 @@ import tempfile
 import uuid
 from pathlib import Path
 
+import rotation
+
 
 def uid():
     return uuid.uuid4().hex
@@ -52,21 +54,17 @@ def new_map():
     }
 
 
-def rotate(x, z, yaw):
-    a = math.radians(yaw)
-    return (math.cos(a) * x + math.sin(a) * z, -math.sin(a) * x + math.cos(a) * z)
-
-
 def world(obj, local):
     x, y, z = [a * b for a, b in zip(local, obj["scale"])]
-    x, z = rotate(x, z, obj["yaw"])
-    return [a + b for a, b in zip((x, y, z), obj["position"])]
+    point = rotation.apply(rotation.quaternion(rotation.orientation(obj)), (x, y, z))
+    return [a + b for a, b in zip(point, obj["position"])]
 
 
 def local(obj, point):
     x, y, z = [a - b for a, b in zip(point, obj["position"])]
-    x, z = rotate(x, z, -obj["yaw"])
-    return [a / b for a, b in zip((x, y, z), obj["scale"])]
+    i, j, k, w = rotation.quaternion(rotation.orientation(obj))
+    point = rotation.apply((-i, -j, -k, w), (x, y, z))
+    return [a / b for a, b in zip(point, obj["scale"])]
 
 
 def vector(values):
@@ -98,6 +96,7 @@ def validate(doc):
         if obj["kind"] not in ("block", "trigger", "spawn", "model") or not obj["name"].strip():
             raise ValueError("Invalid object kind or empty name")
         vector(obj["position"])
+        vector(rotation.orientation(obj))
         if min(vector(obj["scale"])) <= 0 or not math.isfinite(obj["yaw"]):
             raise ValueError("Scale must be positive and yaw must be finite")
         if obj["kind"] == "model" and not isinstance(obj["asset"], str):
@@ -150,6 +149,7 @@ def brief(path, doc):
         if not o["notes"]:
             continue
         target = {k: o[k] for k in ("id", "kind", "name", "position", "scale", "yaw")}
+        target["rotation"] = rotation.orientation(o)
         target["node"] = runtime_name(o)
         if "asset" in o:
             target["asset"] = relative(o["asset"], path.parent)
@@ -160,7 +160,7 @@ def brief(path, doc):
         {
             "version": 1,
             "map_id": doc["id"],
-            "coordinates": "Metres, Y up, yaw in degrees about +Y",
+            "coordinates": "Metres, Y up, Euler XYZ degrees applied X then Y then Z",
             "objects": objects,
         },
     )

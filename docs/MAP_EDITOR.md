@@ -1,24 +1,41 @@
 # goreX Map Editor
 
-Run `run-editor.bat` from the repository. The editor uses Python 3 with Tkinter.
-Playtest uses the Windows game built by `build-windows.bat`. You can also open
+Run `run-editor.bat` from the repository. The Windows editor uses Python 3 with Tkinter and a native OpenGL 3D viewport. The launcher calls the Windows build script if the viewport DLL is missing. Playtest uses the game built by `build-windows.bat`. You can also open
 a project with `run-editor.bat "path\to\room.goremap"`.
 
 Open `assets/maps/airlock.goremap` for a working example with the Import Lab and
 an annotated airlock threshold.
 
+## 3D viewport controls
+
+Click a mesh or its entry in the object list to select it. Middle-drag orbits,
+Shift-middle-drag pans, and the wheel zooms. Press **F** over the viewport to
+frame the selection. **Fit map** frames the entire scene.
+
+| Tool | Shortcut | Example |
+| --- | --- | --- |
+| Move | G | G, X, 2, Enter moves two metres along world X. |
+| Rotate | R | R, Z, 90, Enter rotates 90 degrees around world Z. |
+| Scale | S | S, Y, 0.5, Enter halves the object's local Y scale. |
+
+Choose a tool in the toolbar to drag its colored handles. Red is X, green is Y,
+blue is Z. With a keyboard transform active, move the mouse or type a value,
+then left-click or press Enter to confirm. Escape or right-click cancels.
+Tap the active axis again to release the constraint. Free move uses the view
+plane, free rotation uses the viewing axis, and free scale is uniform.
+Ctrl+Z undoes an edit. Ctrl+Shift+Z redoes it. The inspector accepts exact XYZ
+positions, positive scales and Euler angles in degrees. The engine is Y-up.
+
 ## Build a room
 
-1. Start with the floor and player spawn. Add a block, select it in the plan
-   or object list, then set its name, position, scale and yaw in the inspector.
+1. Start with the floor and player spawn. Add a block, select it in the viewport
+   or object list, then set its name, position, scale and rotation in the inspector.
    The block starts as a one-metre cube. Use its scale to size a wall or platform.
    A block exports visible geometry and a matching collision marker.
-2. Drag objects in the X/Z plan. Turn off quarter-metre snapping for free
-   placement. Use the inspector for exact X/Y/Z values, including height.
-   Middle-drag pans, the wheel zooms at the pointer, and **Fit map** frames
-   the objects. The list selects overlapping objects individually.
+2. Use the move handles to place objects. Quarter-metre snapping applies to
+   mouse translation. Typed distances use the exact value.
 3. Use **Import model** for a local glTF 2.0 GLB or glTF scene. The imported
-   scene moves as one placement. Its plan outlines come from mesh bounds.
+   scene moves as one placement. The viewport shows solid, material-colored meshes in their static pose. Playtest shows game lighting, textures and animation.
    Import authored collision markers with the model, or add blockout collision
    using blocks. A trigger exports an invisible volume. The engine tests
    triggers using their world-axis-aligned bounding boxes.
@@ -37,8 +54,8 @@ supported metadata, while shading follows the game's existing material loader.
 
 ## Describe logic for an AI agent
 
-Select the object that owns the behavior. Choose **Place pin on plan** and click
-the desired spot. Enter its exact world X/Y/Z, describe the behavior and the
+Select the object that owns the behavior. Choose **Pin to 3D surface** and click
+the desired spot on the selected mesh. The depth buffer supplies its world X/Y/Z. Adjust the coordinates, describe the behavior and the
 condition that would demonstrate success, then click **Apply note**. A pin on
 an imported mesh can identify its source node by name and glTF index. Use the
 node selector when meshes overlap. Review node references after swapping or

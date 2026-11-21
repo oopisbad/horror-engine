@@ -835,9 +835,12 @@ in four 800x600 Import Lab captures. The final Windows build passed
 
 ## Map editor
 
-Launch `run-editor.bat` to assemble a map in the X/Z plan, import GLB or
+Launch `run-editor.bat` to assemble a map in the native 3D viewport, import GLB or
 glTF scenes, and playtest in the Windows game. Save the editable project as
 `.goremap`. Gameplay logic notes attach to exact positions on placed objects.
 The AI brief exports their stable IDs, runtime node names, local and world
 coordinates, optional source mesh nodes, and behavior descriptions.
-See [the map editor guide](docs/MAP_EDITOR.md) for authoring and export.
+Use G to move, R to rotate and S to scale. Press X, Y or Z to lock an axis,
+type an exact value, then press Enter. The inspector, exported glTF and
+logic-pin coordinates use the same three-axis rotation. Older yaw-only maps
+open directly. See [the map editor guide](docs/MAP_EDITOR.md) for authoring and export.

@@ -4,12 +4,12 @@ import base64
 import copy
 import hashlib
 import json
-import math
 import mimetypes
 import struct
 from pathlib import Path
 from urllib.parse import unquote, urlsplit
 
+import rotation
 from maps import dump, runtime_name, validate
 
 TABLES = (
@@ -256,12 +256,12 @@ def export(path, doc):
         return idx
 
     for o in sorted(doc["objects"], key=lambda o: o["kind"] != "spawn"):
-        a = math.radians(o["yaw"]) * 0.5
+        q = rotation.quaternion(rotation.orientation(o))
         root = {
             "name": runtime_name(o),
             "translation": o["position"],
             "scale": o["scale"],
-            "rotation": [0, math.sin(a), 0, math.cos(a)],
+            "rotation": q,
             "extras": {"editor_id": o["id"], "editor_label": o["name"]},
         }
         kind = o["kind"]

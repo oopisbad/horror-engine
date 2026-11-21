@@ -5,7 +5,6 @@ from tempfile import TemporaryDirectory
 
 import gltf
 import maps
-from footprints import footprints
 
 ASSETS = Path(__file__).resolve().parents[1] / "assets" / "test"
 
@@ -44,7 +43,6 @@ class MapTests(unittest.TestCase):
             obj = maps.item("model", filename)
             asset = ASSETS / filename
             obj["asset"] = str(asset)
-            self.assertTrue(footprints(asset))
             doc["objects"].append(obj)
         with TemporaryDirectory(dir=Path(__file__).resolve().parent) as tmp:
             level = Path(tmp) / "test.gltf"
