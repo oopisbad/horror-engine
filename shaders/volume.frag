@@ -15,6 +15,36 @@ uniform vec2 uCone;
 uniform float uRange;
 uniform int uSteps;
 uniform int uFlashlightShadows;
+struct LocalSpot { vec3 position; vec3 direction; vec3 color; vec3 coneRange; int shadowSlot; };
+uniform LocalSpot uLocalSpots[4];
+uniform int uLocalSpotCount;
+uniform mat4 uLocalShadowVP[2];
+layout(binding=13) uniform sampler2DShadow uLocalShadow0;
+layout(binding=14) uniform sampler2DShadow uLocalShadow1;
+
+vec3 scatteredLight(vec3 p)
+{
+    vec3 light = vec3(0);
+    for (int k=0; k<uLocalSpotCount; ++k) {
+        LocalSpot spot = uLocalSpots[k];
+        vec3 ray = p - spot.position;
+        float d = max(length(ray),0.001);
+        if (d >= spot.coneRange.z) continue;
+        float cone = smoothstep(spot.coneRange.x,max(spot.coneRange.x+0.0001,spot.coneRange.y),dot(ray/d,spot.direction));
+        if (cone == 0.0) continue;
+        float visibility = 1.0;
+        if (spot.shadowSlot >= 0) {
+            vec4 clip = uLocalShadowVP[spot.shadowSlot]*vec4(p,1);
+            vec3 uv = clip.xyz/clip.w*0.5+0.5;
+            uv.z -= 0.00015;
+            if (uv.z > 0.0) visibility = spot.shadowSlot==0 ? texture(uLocalShadow0,uv) : texture(uLocalShadow1,uv);
+        }
+        float falloff = 1.0-d/spot.coneRange.z;
+        light += spot.color * (cone*visibility*falloff*falloff/(1.0+d*d));
+    }
+    return light;
+}
+
 struct Fog { mat4 worldToBox; vec4 colorDensity; };
 uniform Fog uFog[4];
 uniform int uFogCount;
@@ -79,7 +109,19 @@ void main()
         float span = segment.y-segment.x;
         if (span <= 0.0) continue;
         float coverage = 1.0-exp(-span*uFog[i].colorDensity.a);
-        haze += uFog[i].colorDensity.rgb * coverage * 0.35;
+        vec3 tint = uFog[i].colorDensity.rgb;
+        haze += tint * coverage * 0.35;
+        if (uLocalSpotCount > 0) {
+            int steps = clamp(uSteps, 2, 12);
+            float stride = span / float(steps);
+            float scatter = 1.0-exp(-stride*uFog[i].colorDensity.a);
+            float throughput = 1.0;
+            for (int j=0; j<steps; ++j) {
+                vec3 p = uEye + dir*(segment.x+(float(j)+0.5)*stride);
+                haze += tint * scatteredLight(p) * (scatter*throughput);
+                throughput *= 1.0-scatter;
+            }
+        }
     }
     // Alpha carries eye-to-surface distance for depth-aware upsampling.
     oVolume = vec4(haze, distanceToScene);

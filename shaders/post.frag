@@ -29,6 +29,9 @@ uniform float uBloomStrength;
 uniform int uHasVolume;
 layout(binding=12) uniform sampler2D uReflection;
 uniform int uHasReflections;
+layout(binding=4) uniform sampler2D uContact;
+layout(binding=5) uniform sampler2D uIndirect;
+uniform int uHasContact;
 uniform vec2 uRayScale;
 uniform vec2 uRasterOffset;
 
@@ -86,6 +89,8 @@ void main()
         / (uFar + uNear - (depth * 2.0 - 1.0) * (uFar - uNear));
     vec2 slope = (vUv * 2.0 - 1.0) * uRayScale;
     float distanceToScene = linearDepth * sqrt(1.0 + dot(slope, slope));
+    if (uHasContact != 0)
+        color = max(vec3(0), color - texture(uIndirect, vUv + uRasterOffset).rgb * upsampleDepthAware(uContact, linearDepth).r);
     if (uHasReflections != 0)
         color += upsampleDepthAware(uReflection, linearDepth);
     float density = distanceToScene * uFogDensity;

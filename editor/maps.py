@@ -9,6 +9,31 @@ from pathlib import Path
 
 import rotation
 
+# Fields are (display name, initial value, minimum, maximum).
+COLOR = {f"color_{c}": (label, 1.0, 0, 1) for c, label in zip("rgb", ("Red", "Green", "Blue"))}
+SURFACE = {
+    "roughness": ("Roughness", 0.8, 0, 1),
+    "normal_strength": ("Normal map strength", 1, 0, 4),
+}
+DECAL = {"strength": ("Opacity", 0.9, 0, 1), "wetness": ("Wetness", 1, 0, 1), **COLOR}
+PROPERTIES = {
+    "block": SURFACE,
+    "model": SURFACE,
+    "spot": {
+        "intensity": ("Intensity (cd)", 32, 0, 10000),
+        "range": ("Range (m)", 12, 0.1, 200),
+        "cone": ("Outer half-angle (degrees)", 32, 2, 89),
+        **COLOR,
+    },
+    "fog": {"density": ("Density per metre", 0.16, 0, 3), **COLOR},
+    "leak": {**DECAL, **{k: (v[0], 0.12, 0, 1) for k, v in COLOR.items()}},
+    "chip": {
+        **DECAL,
+        **{k: (v[0], 0.55, 0, 1) for k, v in COLOR.items()},
+        "wetness": ("Wetness", 0, 0, 1),
+    },
+}
+
 
 def uid():
     return uuid.uuid4().hex
@@ -93,8 +118,12 @@ def validate(doc):
     check_id(doc["id"])
     for obj in doc["objects"]:
         check_id(obj["id"])
-        if obj["kind"] not in ("block", "trigger", "spawn", "model") or not obj["name"].strip():
+        if obj["kind"] not in (*PROPERTIES, "trigger", "spawn") or not obj["name"].strip():
             raise ValueError("Invalid object kind or empty name")
+        for key, value in obj.get("properties", {}).items():
+            spec = PROPERTIES.get(obj["kind"], {}).get(key)
+            if not spec or not isinstance(value, (int, float)) or not spec[2] <= value <= spec[3]:
+                raise ValueError(f"Invalid {key} on {obj['name']}")
         vector(obj["position"])
         vector(rotation.orientation(obj))
         if min(vector(obj["scale"])) <= 0 or not math.isfinite(obj["yaw"]):
@@ -138,7 +167,13 @@ def save(path, doc):
 def runtime_name(obj):
     if obj["kind"] == "spawn":
         return "SPAWN_player"
-    prefix = "TRIGGER_" if obj["kind"] == "trigger" else "Map_"
+    prefix = {
+        "trigger": "TRIGGER_",
+        "fog": "FOG_",
+        "leak": "DECAL_LEAK_",
+        "chip": "DECAL_CHIP_",
+        "spot": "Spot_",
+    }.get(obj["kind"], "Map_")
     return prefix + obj["id"]
 
 

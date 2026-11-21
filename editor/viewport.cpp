@@ -284,14 +284,28 @@ API void vp_object(
         for (auto& p : model->parts)
             render(p.list, p.node, p.color);
     else {
+        if (kind == 5) {
+            // The spotlight points down local -Z, as it does in glTF.
+            color({id,-1,-1}, vec3(1,.84f,.36f));
+            glDisable(GL_LIGHTING);
+            glBegin(GL_LINES);
+            for (int i=0; i<24; ++i) {
+                auto rim = [](int j) { float a = j * 6.2831853f/24; return vec3(.32f*std::cos(a),.32f*std::sin(a),-.7f); };
+                vertex(rim(i)); vertex(rim(i+1));
+                if (i%6==0) { vertex(vec3(0)); vertex(rim(i)); }
+            }
+            glEnd();
+            glScalef(.18f,.18f,.18f);
+        }
         if (kind == 2) {
             glTranslatef(0, .35f, 0);
             glScalef(.38f, .7f, .38f);
         }
-        if (kind == 1 && !picking)
+        if ((kind == 1 && !picking) || kind == 4)
             glPolygonMode(GL_FRONT_AND_BACK, GL_LINE);
         render(box, -1,
-            kind == 1       ? vec3(1, .58f, .16f)
+            kind == 4       ? vec3(.22f, .78f, .96f)
+                : kind == 1 ? vec3(1, .58f, .16f)
                 : kind == 2 ? vec3(.32f, .8f, .52f)
                             : vec3(.49f, .61f, .68f));
         glPolygonMode(GL_FRONT_AND_BACK, GL_FILL);

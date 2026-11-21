@@ -135,6 +135,7 @@ void ImGuiOverlay::drawDebugWindows(Application &app)
         auto &post = renderer.post();
         ImGui::Checkbox("post enabled", &post.enabled);
         ImGui::SliderFloat("bloom", &post.bloom, 0.0f, 0.4f, "%.2f");
+        ImGui::Checkbox("contact shading", &post.contactShading);
         ImGui::SliderInt("volumetric steps", &post.volumeSteps, 0, 20);
         ImGui::Checkbox("Temporal anti-aliasing", &post.temporalAA);
         ImGui::Checkbox("Screen-space reflections", &post.screenReflections);

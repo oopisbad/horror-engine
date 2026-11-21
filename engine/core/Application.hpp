@@ -26,6 +26,7 @@ public:
         uint32_t windowHeight = 720;
         bool fullscreen = false;
         bool visible = true;
+        bool deterministicReplay = false;
         bool vsync = true;
         unsigned frameRateLimit = 0;
         bool wireframe = false; // start with polygon mode LINE (--wireframe)

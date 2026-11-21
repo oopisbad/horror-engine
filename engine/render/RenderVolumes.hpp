@@ -15,7 +15,7 @@ struct ReflectionProbe {
 };
 
 struct SurfaceDecal {
-    enum class Pattern { Grime, Leak, Scuff };
+    enum class Pattern { Grime, Leak, Scuff, Chip };
     Pattern pattern = Pattern::Grime;
     glm::vec3 tint{0.14f, 0.12f, 0.10f};
     float strength = 0.75f;

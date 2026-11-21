@@ -37,6 +37,44 @@ class ViewportTests(unittest.TestCase):
         for key in keys:
             self.v.key(SimpleNamespace(keysym=key, char=key if len(key) == 1 else "", state=0))
 
+    def test_lit_lamp_and_painted_floor(self):
+        import ctypes as ct
+
+        from viewport import V3
+
+        self.obj["position"][0] = 5
+        self.e.add("spot")
+        lamp = self.e.obj()
+        lamp["rotation"] = [-90, 0, 0]
+        lamp["position"] = [0, 3, 0]
+        self.v.center = [0, 0, 0]
+        self.v.distance = 8
+        w, h = self.v.winfo_width(), self.v.winfo_height()
+        eye = [self.v.distance * v for v in self.v.basis()[2]]
+
+        def image():
+            self.v.gl.vp_begin(w, h, V3(*eye), V3(*self.v.center), 0)
+            self.v.draw_lit(w, h, eye)
+            data = (ct.c_ubyte * (w * h * 4))()
+            ct.windll.opengl32.glReadPixels(0, 0, w, h, 0x1908, 0x1401, data)
+            return bytes(data)
+
+        lit = image()
+        signature = self.v.signature
+        lamp["rotation"] = [90, 0, 0]
+        unlit = image()
+        self.assertIs(self.v.signature, signature)
+        self.assertGreater(sum(lit[0::4]), sum(unlit[0::4]) + w * h)
+        self.v.start_paint("chip")
+        self.v.click(SimpleNamespace(x=w // 2, y=h // 2))
+        decal = self.e.obj()
+        self.assertEqual(decal["kind"], "chip")
+        n = rotation.apply(rotation.quaternion(rotation.orientation(decal)), (0, 0, 1))
+        self.assertGreater(n[1], 0.99)
+        self.e.lit.set(True)
+        self.v.render()
+        self.assertTrue(self.e.lit.get(), self.e.status.get())
+
     def test_constraints_cancel_and_undo(self):
         self.command("g", "y", "-", "2", "Return")
         self.assertEqual(self.obj["position"], [0, -1.5, 0])

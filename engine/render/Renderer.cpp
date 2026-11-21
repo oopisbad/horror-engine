@@ -36,6 +36,7 @@ ForwardRenderer::ForwardRenderer(uint32_t shadowMapSize)
     pointShadowSkinnedShader_ = std::make_unique<Shader>("shadow_depth.vert", "point_shadow.frag", "point_shadow_skin",
         std::vector<std::string>{ "SKINNED" });
     temporalShader_ = std::make_unique<Shader>("post.vert", "temporal.frag", "temporal");
+    contactShader_ = std::make_unique<Shader>("post.vert", "contact.frag", "contact");
     reflectionShader_ = std::make_unique<Shader>("post.vert", "reflections.frag", "reflections");
     postShader_ = std::make_unique<Shader>("post.vert", "post.frag", "post");
     bloomShader_ = std::make_unique<Shader>("post.vert", "bloom.frag", "bloom");
@@ -50,6 +51,9 @@ ForwardRenderer::ForwardRenderer(uint32_t shadowMapSize)
     glSamplerParameteri(shadowSampler_, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
 
     // std140 array of 128 mat4 = 8 KiB; immutable storage + subdata updates.
+    glCreateBuffers(1, &previousBoneUbo_);
+    glNamedBufferStorage(previousBoneUbo_, kMaxBones * sizeof(glm::mat4), nullptr, GL_DYNAMIC_STORAGE_BIT);
+    glBindBufferBase(GL_UNIFORM_BUFFER, 1, previousBoneUbo_);
     glCreateBuffers(1, &boneUbo_);
     glNamedBufferStorage(boneUbo_, kMaxBones * sizeof(glm::mat4), nullptr,
         GL_DYNAMIC_STORAGE_BIT);
@@ -83,6 +87,7 @@ ForwardRenderer::~ForwardRenderer()
     for (auto &frame : gpuFrames_)
         if (frame.marks.front())
             glDeleteQueries(static_cast<GLsizei>(frame.marks.size()), frame.marks.data());
+    glDeleteBuffers(1, &previousBoneUbo_);
     if (boneUbo_)
         glDeleteBuffers(1, &boneUbo_);
     if (fullscreenVao_)
@@ -150,6 +155,7 @@ bool ForwardRenderer::tickShaderReloads()
     any |= pointShadowShader_->checkHotReload();
     any |= pointShadowSkinnedShader_->checkHotReload();
     any |= temporalShader_->checkHotReload();
+    any |= contactShader_->checkHotReload();
     any |= reflectionShader_->checkHotReload();
     if (any) {
         resetHistory();
@@ -220,6 +226,7 @@ void ForwardRenderer::buildQueue(Scene &scene, const Camera &camera)
         if (!mesh)
             return;
         RenderItem item;
+        item.entity = id;
         item.mesh = mesh;
         item.material = material;
         item.world = scene.worldMatrix(id);
@@ -327,12 +334,19 @@ void ForwardRenderer::setupLightingUniforms(const Shader &shader, const Camera &
     shader.setUniform("uShadowBias", shadowBias_);
     shader.setUniform("uShadows", flashlightShadows_ && !capturingProbe_ ? 1 : 0);
     shader.setUniform("uShadowMap", 15);
+    glBindTextureUnit(20, shadowTarget_->depth());
+    bindLocalSpots(shader);
+}
+
+void ForwardRenderer::bindLocalSpots(const Shader &shader)
+{
     shader.setUniform("uLocalSpotCount", static_cast<int>(localSpotCount_));
     for (size_t i = 0; i < spotShadows_.size(); ++i) {
         const auto &slot = spotShadows_[i];
         const auto matrix = "uLocalShadowVP[" + std::to_string(i) + "]";
         shader.setUniform(matrix.c_str(), slot.vp);
         glBindTextureUnit(13 + static_cast<GLuint>(i), slot.map ? slot.map->depth() : 0);
+        glBindTextureUnit(21 + static_cast<GLuint>(i), slot.map ? slot.map->depth() : 0);
         glBindSampler(13 + static_cast<GLuint>(i), shadowSampler_);
     }
     for (size_t i = 0; i < localSpotCount_; ++i) {
@@ -346,8 +360,19 @@ void ForwardRenderer::setupLightingUniforms(const Shader &shader, const Camera &
     }
 }
 
+void ForwardRenderer::resetSceneCaches()
+{
+    resetHistory();
+    invalidateProbes();
+    poses_.clear();
+    for (auto &slot : spotShadows_) slot.valid = false;
+    pointShadow_.valid.fill(false);
+}
+
 void ForwardRenderer::render(Scene &scene, Camera &camera)
 {
+    stats_.rigidMotionDraws = stats_.skinnedMotionDraws = 0;
+    ++poseFrame_;
     buildQueue(scene, camera);
     gatherEnvironment(scene, camera);
 
@@ -450,14 +475,18 @@ void ForwardRenderer::render(Scene &scene, Camera &camera)
     mainPass(scene, camera);
     mark(2);
     stats_.screenReflections = false;
-    if (post_.enabled) {
-        if (temporalActive_) resolveTemporal(camera);
-        traceReflections(camera);
-        effectsPass(camera);
-    }
+    if (temporalActive_) resolveTemporal(camera);
     mark(3);
-    postPass(camera);
+    if (post_.enabled) traceReflections(camera);
     mark(4);
+    if (post_.enabled && post_.contactShading) contactPass(camera);
+    mark(5);
+    if (post_.enabled) effectsPass(camera, timing ? timing->marks[6] : 0);
+    else mark(6);
+    mark(7);
+    postPass(camera);
+    mark(8);
+    std::erase_if(poses_, [&](const auto &entry) { return entry.second.frame != poseFrame_; });
     for (GLuint unit : {13u, 14u, 15u, 16u}) {
         glBindSampler(unit, 0);
         glBindTextureUnit(unit, 0);
@@ -683,6 +712,8 @@ void ForwardRenderer::updateLocalShadows(const Camera &camera)
 void ForwardRenderer::bindLitUniforms(const Shader &shader, Camera &camera)
 {
     shader.setUniform("uViewProj", drawViewProj_);
+    shader.setUniform("uPixelSize", 1.0f / glm::vec2(sceneTarget_->width(),sceneTarget_->height()));
+    shader.setUniform("uRasterOffset", rasterOffset_);
     shader.setUniform("uCameraPos", camera.position);
     setupLightingUniforms(shader, camera);
     bindEnvironment(shader);
@@ -695,6 +726,12 @@ void ForwardRenderer::mainPass(Scene &scene, Camera &camera)
     // size, which would otherwise clip the main image.
     auto &target = capturingProbe_ ? *probeTarget_ : *sceneTarget_;
     target.bind();
+    if (!capturingProbe_) {
+        const GLenum draw[] = {GL_COLOR_ATTACHMENT0, GL_COLOR_ATTACHMENT1,
+            temporalActive_ ? GLenum(GL_COLOR_ATTACHMENT2) : GLenum(GL_NONE),
+            post_.enabled && post_.contactShading ? GLenum(GL_COLOR_ATTACHMENT3) : GLenum(GL_NONE)};
+        glNamedFramebufferDrawBuffers(target.fbo(), 4, draw);
+    }
     glClearColor(0.0f, 0.0f, 0.0f, 1.0f);
     glDepthMask(GL_TRUE);
     glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
@@ -729,7 +766,30 @@ void ForwardRenderer::mainPass(Scene &scene, Camera &camera)
             if (skinnedPass)
                 uploadBones(*item.bones);
             shader.setUniform("uModel", item.world);
-            shader.setUniform("uReactive", item.dynamic ? 1 : 0);
+            bool moving = item.dynamic;
+            bool validPose = false;
+            if (temporalActive_ && !capturingProbe_) {
+                auto &pose = poses_[item.entity];
+                validPose = historyValid_ && pose.frame + 1 == poseFrame_ && pose.frame != 0
+                    && pose.bones.size() == (item.bones ? item.bones->size() : 0);
+                moving |= validPose && pose.world != item.world;
+                if (moving && validPose) {
+                    if (item.bones) ++stats_.skinnedMotionDraws;
+                    else ++stats_.rigidMotionDraws;
+                    shader.setUniform("uPreviousMVP", previousViewProj_ * pose.world);
+                    if (item.bones && !pose.bones.empty()) {
+                        const auto count = std::min<size_t>(kMaxBones, pose.bones.size());
+                        glNamedBufferSubData(previousBoneUbo_, 0, count * sizeof(glm::mat4), pose.bones.data());
+                        glBindBufferBase(GL_UNIFORM_BUFFER, 1, previousBoneUbo_);
+                    }
+                }
+                pose.world = item.world;
+                if (item.bones) pose.bones = *item.bones;
+                else pose.bones.clear();
+                pose.frame = poseFrame_;
+            }
+            shader.setUniform("uWriteMotion", moving && validPose ? 1 : 0);
+            shader.setUniform("uReactive", moving ? 1 : 0);
             const auto worldBasis = glm::mat3(item.world);
             const float det = glm::determinant(worldBasis);
             if (std::abs(det) < 1e-10f)
@@ -797,10 +857,9 @@ void ForwardRenderer::mainPass(Scene &scene, Camera &camera)
 
 }
 
-void ForwardRenderer::effectsPass(const Camera &camera)
+void ForwardRenderer::effectsPass(const Camera &camera, GLuint volumeEnd)
 {
-    if (post_.bloom <= 0.0f && (post_.volumeSteps <= 0 || (!flashlightShadows_ && fogCount_ == 0)))
-        return;
+
 
     glDisable(GL_DEPTH_TEST);
     glDisable(GL_CULL_FACE);
@@ -820,6 +879,7 @@ void ForwardRenderer::effectsPass(const Camera &camera)
         // Alpha stores linear distance for the depth-aware upsampler.
         target(volumeTarget_, Framebuffer::Kind::ColorAlpha, 4);
         volumeShader_->bind();
+        bindLocalSpots(*volumeShader_);
         glBindTextureUnit(0, sceneTarget_->depth());
         volumeShader_->setUniform("uInvViewProj", glm::inverse(camera.viewProjection()));
         volumeShader_->setUniform("uRasterOffset", rasterOffset_);
@@ -842,6 +902,7 @@ void ForwardRenderer::effectsPass(const Camera &camera)
         glDrawArrays(GL_TRIANGLES, 0, 3);
     }
 
+    if (volumeEnd) glQueryCounter(volumeEnd, GL_TIMESTAMP);
     if (post_.bloom > 0.0f) {
         bloomShader_->bind();
         GLuint source = sceneColor();
@@ -891,6 +952,9 @@ void ForwardRenderer::postPass(const Camera &camera)
     glDisable(GL_CULL_FACE);
 
     postShader_->bind();
+    postShader_->setUniform("uHasContact", post_.contactShading ? 1 : 0);
+    glBindTextureUnit(4, post_.contactShading ? contactTarget_->colorAttachment() : 0);
+    glBindTextureUnit(5, sceneTarget_->colorAttachment(3));
     glBindTextureUnit(0, sceneColor());
     glBindTextureUnit(12, reflectionsReady_ ? reflectionTarget_->colorAttachment() : 0);
     postShader_->setUniform("uHasReflections", reflectionsReady_ ? 1 : 0);

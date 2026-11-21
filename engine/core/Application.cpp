@@ -112,7 +112,8 @@ int Application::run()
     while (running_ && !window_.shouldClose()) {
         const auto frameStart = std::chrono::steady_clock::now();
         const float frameDt = frameTimer_.tickRealtime();
-        elapsed_ += frameDt;
+        const float visualDt = config_.deterministicReplay ? 1.0f / 60.0f : frameDt;
+        elapsed_ += visualDt;
         // Edge state rolls BEFORE new events arrive (pressed/released compare
         // this frame against the previous one; see Input::update).
         input_.update();
@@ -157,7 +158,7 @@ int Application::run()
 
         // Animation runs at the variable frame rate (not the fixed step) so
         // playback stays smooth; gameplay decides what to play per frame.
-        if (simulationEnabled) AnimationSystem::update(scene_, frameDt);
+        if (simulationEnabled) AnimationSystem::update(scene_, visualDt);
 
         if (worldVisible) {
             scene_.updateWorldMatrices();

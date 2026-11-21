@@ -143,6 +143,7 @@ LevelInstance LevelBuilder::instantiate(Scene &scene, std::shared_ptr<GltfModel>
                 SurfaceDecal decal;
                 if (startsWith(node.name, "DECAL_LEAK")) decal.pattern = SurfaceDecal::Pattern::Leak;
                 if (startsWith(node.name, "DECAL_SCUFF")) decal.pattern = SurfaceDecal::Pattern::Scuff;
+                if (startsWith(node.name, "DECAL_CHIP")) decal.pattern = SurfaceDecal::Pattern::Chip;
                 decal.tint = tint(node, decal.tint);
                 decal.strength = scalar(node, "strength", decal.strength, 0, 1);
                 decal.wetness = scalar(node, "wetness", 0, 0, 1);

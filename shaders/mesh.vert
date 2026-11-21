@@ -12,6 +12,9 @@ layout(location = 5) in vec4 aWeights;
 layout(location = 6) in vec2 aLightmapUv;
 
 uniform mat4 uModel;
+uniform int uWriteMotion;
+uniform mat4 uPreviousMVP;
+layout(location=6) out vec4 vPreviousClip;
 uniform mat3 uNormalMatrix;
 uniform float uTangentSign;
 uniform mat4 uViewProj;
@@ -20,6 +23,7 @@ uniform mat4 uLightViewProj;
 #ifdef SKINNED
 const int MAX_BONES = 128;
 // std140 mat4 array: 64 bytes/entry. Keep MAX_BONES in sync with the renderer.
+layout(std140, binding = 1) uniform PreviousBones { mat4 previousBones[MAX_BONES]; };
 layout(std140, binding = 0) uniform BoneBlock
 {
     mat4 uBones[MAX_BONES];
@@ -53,6 +57,16 @@ void main()
 #endif
 
     // uModel is the entity/root transform on top of the (skinned) model space.
+    vPreviousClip = vec4(0);
+    if (uWriteMotion != 0) {
+        vec4 previousLocal = vec4(aPosition, 1);
+#ifdef SKINNED
+        mat4 oldSkin = aWeights.x * previousBones[aJoints.x] + aWeights.y * previousBones[aJoints.y]
+                     + aWeights.z * previousBones[aJoints.z] + aWeights.w * previousBones[aJoints.w];
+        previousLocal = oldSkin * previousLocal;
+#endif
+        vPreviousClip = uPreviousMVP * previousLocal;
+    }
     vec4 world = uModel * vec4(localPos, 1.0);
     vWorldPos = world.xyz;
     // Inverse transpose keeps normals perpendicular under nonuniform scale.

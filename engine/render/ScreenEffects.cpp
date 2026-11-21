@@ -43,6 +43,7 @@ void ForwardRenderer::resolveTemporal(const Camera &camera)
     glBindTextureUnit(0, sceneTarget_->colorAttachment());
     glBindTextureUnit(1, sceneTarget_->depth());
     glBindTextureUnit(2, sceneTarget_->colorAttachment(1));
+    glBindTextureUnit(4, sceneTarget_->colorAttachment(2));
     glBindTextureUnit(3, useHistory ? last->colorAttachment() : 0);
     const auto viewProj = camera.viewProjection();
     temporalShader_->setUniform("uHistoryValid", useHistory ? 1 : 0);
@@ -95,6 +96,28 @@ void ForwardRenderer::traceReflections(const Camera &camera)
     reflectionShader_->setUniform("uPlanes", glm::vec2(camera.nearPlane, camera.farPlane));
     glDrawArrays(GL_TRIANGLES, 0, 3);
     glBindVertexArray(0);
+}
+
+void ForwardRenderer::contactPass(const Camera &camera)
+{
+    const auto width = (sceneTarget_->width() + 1) / 2;
+    const auto height = (sceneTarget_->height() + 1) / 2;
+    if (!contactTarget_)
+        contactTarget_ = std::make_unique<Framebuffer>(Framebuffer::Kind::ColorAlpha, width, height, true);
+    else
+        contactTarget_->resize(width, height);
+    contactTarget_->bind();
+    glDisable(GL_BLEND);
+    glDisable(GL_DEPTH_TEST);
+    glDisable(GL_CULL_FACE);
+    contactShader_->bind();
+    glBindTextureUnit(0, sceneTarget_->depth());
+    glBindTextureUnit(1, sceneTarget_->colorAttachment(1));
+    contactShader_->setUniform("uInverseProjection", glm::inverse(camera.projection()));
+    contactShader_->setUniform("uView", camera.view());
+    contactShader_->setUniform("uRasterOffset", rasterOffset_);
+    glBindVertexArray(fullscreenVao_);
+    glDrawArrays(GL_TRIANGLES, 0, 3);
 }
 
 } // namespace horror

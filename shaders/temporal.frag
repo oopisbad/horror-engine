@@ -7,6 +7,7 @@ layout(binding=1) uniform sampler2D uDepth;
 layout(binding=2) uniform sampler2D uSurface;
 layout(binding=3) uniform sampler2D uHistory;
 
+layout(binding=4) uniform sampler2D uMotion;
 uniform mat4 uInverseVP;
 uniform mat4 uPreviousVP;
 uniform vec2 uPlanes;
@@ -15,10 +16,15 @@ uniform int uHistoryValid;
 uniform int uFixedView;
 uniform float uLightingChange;
 
-vec4 reprojectHistory(vec2 uv, float depth, ivec2 size)
+vec4 reprojectHistory(vec2 uv, float depth, ivec2 size, bool dynamic)
 {
     vec4 p = uInverseVP * vec4(uv*2.0-1.0, depth*2.0-1.0, 1.0);
     vec4 previous = uPreviousVP * vec4(p.xyz / p.w, 1.0);
+    vec4 motion = texelFetch(uMotion, ivec2(gl_FragCoord.xy), 0);
+    if (dynamic) {
+        if (motion.a < 0.5) return vec4(0);
+        previous = vec4(((uv+motion.xy)*2.0-1.0)*motion.z, 0, motion.z);
+    }
     if (previous.w <= 0.0)
         return vec4(0.0);
     vec2 oldUv = previous.xy / previous.w * 0.5 + 0.5;
@@ -29,7 +35,7 @@ vec4 reprojectHistory(vec2 uv, float depth, ivec2 size)
     // moving silhouettes across static geometry.
     float depthTolerance = max(0.035, previous.w * 0.018);
     float oldDepth = texelFetch(uHistory, ivec2(oldUv*vec2(size)), 0).a;
-    if (oldDepth <= 0.0 || abs(oldDepth - previous.w) > depthTolerance)
+    if ((oldDepth < 0.0) != dynamic || abs(abs(oldDepth) - previous.w) > depthTolerance)
         return vec4(0.0);
 
     vec2 samplePosition = oldUv * vec2(size) - 0.5;
@@ -40,7 +46,7 @@ vec4 reprojectHistory(vec2 uv, float depth, ivec2 size)
     for (int y = 0; y < 2; ++y)
         for (int x = 0; x < 2; ++x) {
             vec4 tap = texelFetch(uHistory, clamp(base+ivec2(x,y),ivec2(0),size-1),0);
-            if (tap.a <= 0.0 || abs(tap.a-previous.w) > depthTolerance) continue;
+            if ((tap.a < 0.0) != dynamic || abs(abs(tap.a)-previous.w) > depthTolerance) continue;
             float weight = (x == 0 ? 1.0-f.x : f.x) * (y == 0 ? 1.0-f.y : f.y);
             history += tap.rgb*weight;
             weightSum += weight;
@@ -64,11 +70,11 @@ void main()
     vec3 current = texture(uCurrent, rasterUv).rgb;
     bool reactive = texelFetch(uSurface, pixel, 0).a >= 0.5;
     oHistory = vec4(current, reactive ? -viewDepth : viewDepth);
-    if (uHistoryValid == 0 || reactive)
+    if (uHistoryValid == 0)
         return;
 
     vec4 history;
-    if (uFixedView != 0) {
+    if (uFixedView != 0 && !reactive) {
         // Jitter can swap which side of a static edge supplies the depth.
         // Both sides contribute to the same output pixel when the view is fixed.
         history = texelFetch(uHistory, pixel, 0);
@@ -78,7 +84,7 @@ void main()
     } else {
         if (depth >= 1.0)
             return;
-        history = reprojectHistory(vUv, depth, size);
+        history = reprojectHistory(vUv, depth, size, reactive);
         if (history.a <= 0.0)
             return;
     }

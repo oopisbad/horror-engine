@@ -1295,6 +1295,7 @@ int main(int argc, char **argv)
     bool importLab = false;
     bool importCheck = false;
     bool levelTour = false;
+    bool noContact = false;
     std::string levelPath;
     bool benchmark = false;
     bool checkVisuals = false;
@@ -1314,6 +1315,12 @@ int main(int argc, char **argv)
         if (a == "--play") quickplay = true;
         else if (a == "--benchmark") benchmark = true;
         else if (a == "--check-visuals") { checkVisuals = true; importLab = true; benchmark = true; levelTour = true; }
+        else if (a == "--lighting-replay") {
+            cfg.deterministicReplay = true;
+            importLab = levelTour = benchmark = true;
+            cfg.visible = false;
+        }
+        else if (a == "--no-contact") noContact = true;
         else if (a == "--no-taa") noTemporal = true;
         else if (a == "--no-ssr") noReflections = true;
         else if (a == "--no-local-shadows") noLocalShadows = true;
@@ -1391,16 +1398,18 @@ int main(int argc, char **argv)
         app.renderer().setLocalShadowBudget(0, false);
         app.renderer().post().temporalAA = false;
         app.renderer().post().screenReflections = false;
+        app.renderer().post().contactShading = false;
         app.renderer().post().volumeSteps = 0;
         app.renderer().post().bloom = 0.0f;
     }
+    if (noContact) app.renderer().post().contactShading = false;
     if (noTemporal) app.renderer().post().temporalAA = false;
     if (noReflections) app.renderer().post().screenReflections = false;
     if (noLocalShadows) app.renderer().setLocalShadowBudget(0, false);
     app.renderer().setGpuProfiling(benchmark);
     app.renderer().setDebugDrawEnabled(debugDraw);
     std::vector<float> frameTimes;
-    std::array<double, 4> gpuTotals{};
+    std::array<double, 8> gpuTotals{};
     uint32_t lastGpuSample = 0;
     uint32_t cachedShadowPeak = 0, updatedShadowPeak = 0, temporalPeak = 0;
     bool cutRejectedHistory = false;
@@ -1553,6 +1562,18 @@ int main(int argc, char **argv)
     if (importCheck)
         return checkImportLab(app, imported, player) ? 0 : 1;
 
+    EntityId replayCrate = kInvalidEntity;
+    glm::vec3 crateOrigin(0), actorOrigin(0);
+    bool sawRigidMotion = false, sawSkinnedMotion = false;
+    if (cfg.deterministicReplay) {
+        if (app.scene().valid(cesiumMan.root)) actorOrigin = app.scene().transform(cesiumMan.root).position;
+        for (EntityId id : imported.entities)
+            if (app.scene().name(id) == "PROP_Test crate") {
+                replayCrate = id;
+                crateOrigin = app.scene().transform(id).position;
+                break;
+            }
+    }
     const glm::vec3 initialSpawn = app.scene().transform(player).position;
     Frontend frontend(app, player, [&] {
         resetCharacter(app, player, initialSpawn);
@@ -1620,7 +1641,11 @@ int main(int argc, char **argv)
         }
         if (levelTour) {
             const float progress = static_cast<float>(app.framesRun()) / std::max(1,frameLimit-1);
-            const float track = progress * static_cast<float>(tour.size()-1);
+            // Four frame-indexed shots: locked view, slow pan, fast turn, flashlight sweep.
+            float path = progress;
+            if (cfg.deterministicReplay)
+                path = 0.025f + 0.13f * std::clamp((progress-0.25f)*4,0.f,1.f);
+            const float track = path * static_cast<float>(tour.size()-1);
             const auto index = std::min(static_cast<size_t>(track),tour.size()-2);
             const float blend = std::clamp(track-static_cast<float>(index),0.0f,1.0f);
             const auto &a = tour[index], &b = tour[index+1];
@@ -1629,9 +1654,25 @@ int main(int argc, char **argv)
             app.camera().position = glm::mix(a.position,b.position,blend);
             app.camera().yaw = yawA + std::remainder(yawB-yawA,6.2831853f)*blend;
             app.camera().pitch = std::asin(std::clamp(glm::mix(a.forward.y,b.forward.y,blend),-1.0f,1.0f));
+            if (cfg.deterministicReplay) {
+                float turn = std::clamp((progress-0.5f)*16,0.f,1.f);
+                app.camera().yaw += (turn-std::clamp((progress-0.60f)*12,0.f,1.f)) * glm::half_pi<float>();
+                float phase = progress * glm::two_pi<float>();
+                if (replayCrate != kInvalidEntity)
+                    app.scene().transform(replayCrate).position = crateOrigin + glm::vec3(0.9f*std::sin(phase*3),0,0);
+                if (app.scene().valid(cesiumMan.root))
+                    app.scene().transform(cesiumMan.root).position = actorOrigin + glm::vec3(-1.4f+1.4f*std::cos(phase),0,0);
+                sawRigidMotion |= app.renderer().stats().rigidMotionDraws > 0;
+                sawSkinnedMotion |= app.renderer().stats().skinnedMotionDraws > 0;
+            }
             if (checkVisuals && app.framesRun() >= frameLimit - 5)
                 app.camera().yaw += glm::half_pi<float>();
             syncFlashlight(app, flashlight);
+            if (cfg.deterministicReplay && progress >= 0.75f) {
+                auto &lamp = app.scene().transform(flashlight);
+                float sweep = 0.8f*std::sin((progress-0.75f)*glm::two_pi<float>()*4);
+                lamp.rotation = glm::angleAxis(sweep,glm::vec3(0,1,0))*lamp.rotation;
+            }
         }
         if (checkVisuals) {
             const auto &stats = app.renderer().stats();
@@ -1714,6 +1755,10 @@ int main(int argc, char **argv)
         if (!pass)
             return 3;
     }
+    if (cfg.deterministicReplay && app.renderer().post().temporalAA) {
+        HOR_LOG_INFO("motion replay | rigid draws {} | skinned draws {}", sawRigidMotion, sawSkinnedMotion);
+        if (!sawRigidMotion || !sawSkinnedMotion) return 3;
+    }
     if (!frameTimes.empty()) {
         const double average = std::accumulate(frameTimes.begin(), frameTimes.end(), 0.0) / frameTimes.size();
         std::sort(frameTimes.begin(), frameTimes.end());
@@ -1721,8 +1766,9 @@ int main(int argc, char **argv)
             graphics, app.window().frameWidth(), app.window().frameHeight(), frameTimes.size(),
             average, 1000.0 / average, frameTimes[(frameTimes.size()-1)*95/100]);
         if (gpuCount)
-            HOR_LOG_INFO("GPU mean ms | shadow {:.3f} | geometry {:.3f} | effects {:.3f} | composite {:.3f} | {} samples",
-                gpuTotals[0]/gpuCount, gpuTotals[1]/gpuCount, gpuTotals[2]/gpuCount, gpuTotals[3]/gpuCount, gpuCount);
+            HOR_LOG_INFO("GPU mean ms | shadow {:.3f} | geometry {:.3f} | temporal {:.3f} | reflections {:.3f} | contact {:.3f} | fog {:.3f} | bloom {:.3f} | composite {:.3f} | {} samples",
+                gpuTotals[0]/gpuCount, gpuTotals[1]/gpuCount, gpuTotals[2]/gpuCount, gpuTotals[3]/gpuCount,
+                gpuTotals[4]/gpuCount, gpuTotals[5]/gpuCount, gpuTotals[6]/gpuCount, gpuTotals[7]/gpuCount, gpuCount);
     }
     HOR_LOG_INFO("exiting (code {}) after {} frames", exitCode, app.framesRun());
     return exitCode;

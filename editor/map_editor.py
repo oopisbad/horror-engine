@@ -44,7 +44,10 @@ class Editor:
         style.theme_use("clam")
         style.configure(".", background="#222c32", foreground="#e2ebee", font=("Segoe UI", 10))
         style.configure(
-            "TEntry", fieldbackground="#172026", foreground="#edf3f5", insertcolor="#edf3f5"
+            "TEntry",
+            fieldbackground="#172026",
+            foreground="#edf3f5",
+            insertcolor="#edf3f5",
         )
         style.configure("TButton", background="#33424b", padding=(7, 4))
         style.map("TButton", background=[("active", "#405861"), ("pressed", "#48655f")])
@@ -71,13 +74,29 @@ class Editor:
             ),
             (
                 "Edit",
-                [("Undo", self.undo), ("Redo", self.redo), ("Delete selected object", self.remove)],
+                [
+                    ("Undo", self.undo),
+                    ("Redo", self.redo),
+                    ("Delete selected object", self.remove),
+                ],
             ),
         ]:
             group = tk.Menu(menu, tearoff=False)
             for label, command in actions:
                 group.add_command(label=label, command=command)
             menu.add_cascade(label=title, menu=group)
+        lighting = tk.Menu(menu, tearoff=False)
+        for label, kind in (("Add spotlight", "spot"), ("Add room fog", "fog")):
+            lighting.add_command(label=label, command=lambda k=kind: self.add(k))
+        for label, kind in (
+            ("Paint leak on surface", "leak"),
+            ("Paint chipped metal", "chip"),
+        ):
+            lighting.add_command(label=label, command=lambda k=kind: self.canvas.start_paint(k))
+        lighting.add_command(
+            label="Selected surface / lighting properties…", command=self.properties
+        )
+        menu.add_cascade(label="Lighting", menu=lighting)
         root.config(menu=menu)
         bar = ttk.Frame(root, padding=6)
         bar.pack(fill="x")
@@ -92,6 +111,14 @@ class Editor:
             ttk.Button(bar, text=label, command=command).pack(side="left", padx=2)
         tools = ttk.Frame(root, padding=(8, 2, 8, 5))
         tools.pack(fill="x")
+        self.lit = tk.BooleanVar(value=False)
+        ttk.Checkbutton(
+            tools,
+            text="Lit viewport",
+            variable=self.lit,
+            command=lambda: self.canvas.redraw(),
+        ).pack(side="left")
+        ttk.Button(tools, text="Properties…", command=self.properties).pack(side="left")
         self.active_tool = tk.IntVar(value=0)
         for i, tool in enumerate(TOOLS):
             ttk.Radiobutton(
@@ -132,7 +159,10 @@ class Editor:
             for j, k in enumerate(keys):
                 field = ttk.Entry(side, width=9)
                 field.grid(
-                    row=2 * i + 2, column=j, columnspan=3 if len(keys) == 1 else 1, sticky="ew"
+                    row=2 * i + 2,
+                    column=j,
+                    columnspan=3 if len(keys) == 1 else 1,
+                    sticky="ew",
                 )
                 field.bind("<Return>", lambda e: self.apply())
                 self.fields[k] = field
@@ -182,7 +212,11 @@ class Editor:
         return next((o for o in self.doc["objects"] if o["id"] == self.selection), None)
 
     def note_input(self):
-        return ([f.get() for f in self.coords], self.logic.get("1.0", "end-1c"), self.target.get())
+        return (
+            [f.get() for f in self.coords],
+            self.logic.get("1.0", "end-1c"),
+            self.target.get(),
+        )
 
     def finish_fields(self):
         if not self.obj():
@@ -292,7 +326,10 @@ class Editor:
         self.target.configure(values=list(choices))
         reference = n.get("source_node") if n else None
         self.target.set(
-            next((label for label, value in choices.items() if value == reference), "Entire object")
+            next(
+                (label for label, value in choices.items() if value == reference),
+                "Entire object",
+            )
         )
         self.logic.delete("1.0", "end")
         if n:
@@ -372,13 +409,58 @@ class Editor:
                 raise ValueError("Enter a name, positive scale and finite angle.")
             self.checkpoint()
             o.update(
-                name=vals[0].strip(), position=pos, scale=scale, rotation=angles, yaw=angles[1]
+                name=vals[0].strip(),
+                position=pos,
+                scale=scale,
+                rotation=angles,
+                yaw=angles[1],
             )
             self.refresh()
             return True
         except ValueError as e:
             self.error(e)
             return False
+
+    def properties(self):
+        obj = self.obj()
+        if not obj or not maps.PROPERTIES.get(obj["kind"]) or not self.finish_fields():
+            self.status.set("Select a surface, spotlight, fog volume, or decal.")
+            return
+        dialog = tk.Toplevel(self.root)
+        dialog.title(obj["name"] + " · Properties")
+        dialog.transient(self.root)
+        dialog.grab_set()
+        entries = {}
+        current = obj.get("properties", {})
+        spec = maps.PROPERTIES[obj["kind"]]
+        for i, (key, (label, initial, low, high)) in enumerate(spec.items()):
+            ttk.Label(dialog, text=f"{label} ({low}–{high})").grid(
+                row=i, column=0, sticky="w", padx=6
+            )
+            entry = ttk.Entry(dialog, width=12)
+            entry.grid(row=i, column=1, padx=6, pady=2)
+            # An empty surface override preserves each imported material's own value.
+            entry.insert(
+                0,
+                current.get(key, "" if obj["kind"] in ("model", "block") else initial),
+            )
+            entries[key] = entry
+
+        def apply():
+            try:
+                values = {k: float(e.get()) for k, e in entries.items() if e.get().strip()}
+                for key, value in values.items():
+                    if not spec[key][2] <= value <= spec[key][3]:
+                        raise ValueError(spec[key][0] + " is outside its range")
+            except ValueError as exc:
+                messagebox.showerror("Properties", str(exc), parent=dialog)
+                return
+            self.checkpoint()
+            obj["properties"] = values
+            dialog.destroy()
+            self.refresh()
+
+        ttk.Button(dialog, text="Apply", command=apply).grid(row=len(spec), column=1, pady=6)
 
     def add(self, kind, asset=None):
         if not self.finish_fields():
@@ -392,8 +474,18 @@ class Editor:
         o = maps.item(
             kind,
             name,
-            (self.canvas.center[0], 0.5 if kind == "block" else 0, self.canvas.center[2]),
+            (
+                self.canvas.center[0],
+                0.5 if kind == "block" else 0,
+                self.canvas.center[2],
+            ),
         )
+        if kind == "spot":
+            o["position"][1] = 3
+            o["rotation"] = [-65, 0, 0]
+        if kind == "fog":
+            o["position"][1] = 2
+            o["scale"] = [6, 4, 6]
         if asset:
             o["asset"] = str(asset)
         self.checkpoint()
@@ -567,7 +659,8 @@ class Editor:
             target = folder / (self.doc["id"] + ".gltf")
             gltf.export(target, self.doc)
             subprocess.Popen(
-                [str(exe), "--level", str(target), "--play", "--fps-cap", "60"], cwd=ROOT
+                [str(exe), "--level", str(target), "--play", "--fps-cap", "60"],
+                cwd=ROOT,
             )
             self.status.set("Playtest running in the game window.")
         except DOCUMENT_ERRORS as e:

@@ -4,13 +4,14 @@ import base64
 import copy
 import hashlib
 import json
+import math
 import mimetypes
 import struct
 from pathlib import Path
 from urllib.parse import unquote, urlsplit
 
 import rotation
-from maps import dump, runtime_name, validate
+from maps import PROPERTIES, dump, runtime_name, validate
 
 TABLES = (
     "accessors",
@@ -141,7 +142,11 @@ def cube():
         "meshes": [
             {
                 "primitives": [
-                    {"attributes": {"POSITION": 0, "NORMAL": 1}, "indices": 2, "material": 0}
+                    {
+                        "attributes": {"POSITION": 0, "NORMAL": 1},
+                        "indices": 2,
+                        "material": 0,
+                    }
                 ]
             }
         ],
@@ -209,7 +214,11 @@ def merge(dst, source, asset, output):
         target.extend(lights)
     for n in src.get("nodes", []):
         refs(n, "children", "nodes")
-        for key, table in (("mesh", "meshes"), ("skin", "skins"), ("camera", "cameras")):
+        for key, table in (
+            ("mesh", "meshes"),
+            ("skin", "skins"),
+            ("camera", "cameras"),
+        ):
             ref(n, key, table)
         lamp = n.get("extensions", {}).get("KHR_lights_punctual")
         if lamp:
@@ -235,6 +244,13 @@ def merge(dst, source, asset, output):
         if src.get(k):
             dst[k] = sorted(set(dst.get(k, [])) | set(src[k]))
     return [r + offsets["nodes"] for r in roots]
+
+
+def apply_surface(material, properties):
+    if "roughness" in properties:
+        material.setdefault("pbrMetallicRoughness", {})["roughnessFactor"] = properties["roughness"]
+    if "normal_strength" in properties and "normalTexture" in material:
+        material["normalTexture"]["scale"] = properties["normal_strength"]
 
 
 def export(path, doc):
@@ -267,10 +283,60 @@ def export(path, doc):
         kind = o["kind"]
         if kind in ("block", "trigger"):
             root["mesh"] = 0
+        props = o.get("properties", {})
+        if kind in ("spot", "fog", "leak", "chip"):
+            values = {k: props.get(k, spec[1]) for k, spec in PROPERTIES[kind].items()}
+            if kind == "spot":
+                lights = (
+                    out.setdefault("extensions", {})
+                    .setdefault("KHR_lights_punctual", {})
+                    .setdefault("lights", [])
+                )
+                root["extensions"] = {"KHR_lights_punctual": {"light": len(lights)}}
+                outer = math.radians(values["cone"])
+                lights.append(
+                    {
+                        "type": "spot",
+                        "intensity": values["intensity"],
+                        "range": values["range"],
+                        "color": [values["color_" + c] for c in "rgb"],
+                        "spot": {
+                            "outerConeAngle": outer,
+                            "innerConeAngle": outer * 0.7,
+                        },
+                    }
+                )
+                out["extensionsUsed"] = sorted(
+                    set(out.get("extensionsUsed", [])) | {"KHR_lights_punctual"}
+                )
+                root["extras"]["cast_shadow"] = True
+            else:
+                root["extras"].update(values)
         if kind == "block":
+            if props:
+                mat = copy.deepcopy(out["materials"][0])
+                apply_surface(mat, props)
+                mesh = copy.deepcopy(out["meshes"][0])
+                mesh["primitives"][0]["material"] = len(out["materials"])
+                out["materials"].append(mat)
+                root["mesh"] = len(out["meshes"])
+                out["meshes"].append(mesh)
             root["children"] = [node({"name": "COL_" + o["id"], "mesh": 0})]
         if kind == "model":
             asset = Path(o["asset"])
-            root["children"] = merge(out, read_asset(asset), asset, path)
+            src = read_asset(asset)
+            if props:
+                materials = src.setdefault("materials", [])
+                default = None
+                for mesh in src.get("meshes", []):
+                    for primitive in mesh["primitives"]:
+                        if "material" not in primitive:
+                            if default is None:
+                                default = len(materials)
+                                materials.append({})
+                            primitive["material"] = default
+                for material in materials:
+                    apply_surface(material, props)
+            root["children"] = merge(out, src, asset, path)
         out["scenes"][0]["nodes"].append(node(root))
     dump(path, out)

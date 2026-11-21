@@ -844,3 +844,32 @@ Use G to move, R to rotate and S to scale. Press X, Y or Z to lock an axis,
 type an exact value, then press Enter. The inspector, exported glTF and
 logic-pin coordinates use the same three-axis rotation. Older yaw-only maps
 open directly. See [the map editor guide](docs/MAP_EDITOR.md) for authoring and export.
+
+## Lit map editing and graphics replay — 2026-11-21
+
+Enable **Lit viewport** in the Windows map editor. Add a spotlight or fog box from
+**Lighting**, then translate, rotate and scale it in place. Paint a leak or chipped
+metal onto a mesh by clicking its surface. The **Properties…** control edits the
+selected placement. Map saves and playable glTF exports retain these changes.
+See [the map editor guide](docs/MAP_EDITOR.md).
+
+High and Balanced use half-resolution contact occlusion on indirect light. The
+flashlight and shadowed spotlights estimate penumbra width from blocker depth.
+Local spots also scatter through authored fog boxes with shadow-map visibility.
+Temporal smoothing uses previous rigid transforms and previous skinned joint
+poses to reproject moving surfaces. Fast skips contact shading, fog and temporal AA.
+
+The original 300-frame Import Lab tour on the Radeon RX 580 at 1920 × 1080 High
+averaged 2.344 ms before and 2.464 ms after this change, with p95 moving from
+2.400 to 2.773 ms. Each measurement excludes 120 warm-up frames and uses uncapped
+hidden rendering. On the updated tour the GPU measured shadow maps at 0.199 ms,
+geometry at 0.956, temporal resolve at 0.303, reflections at 0.235, contact at
+0.136, fog at 0.144, bloom at 0.119 and composite at 0.334 ms. GPU timestamps
+measure individual passes independently of the CPU frame timer.
+
+Run `python scripts/check-lighting.py` to capture a stationary view, slow pan,
+fast turn and independent flashlight sweep. The replay moves a crate and an
+animated character across the light using a fixed visual timestep. Each shot
+and its GPU timing log are written under `build-windows/lighting-replay`.
+Two runs produced byte-identical still captures on this GPU. Use `--no-contact`
+on the game executable to compare contact shading along the same path.

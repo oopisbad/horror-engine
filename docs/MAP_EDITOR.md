@@ -26,6 +26,26 @@ plane, free rotation uses the viewing axis, and free scale is uniform.
 Ctrl+Z undoes an edit. Ctrl+Shift+Z redoes it. The inspector accepts exact XYZ
 positions, positive scales and Euler angles in degrees. The engine is Y-up.
 
+## Light and dress a room
+
+Turn on **Lit viewport** to see the game's materials, shadows, reflections and fog.
+The editor draws on demand. The preview camera has no player flashlight or film grain.
+
+- Choose **Lighting → Add spotlight**, press **G** to move it and **R** to aim its cone.
+  In **Properties…** set its color, intensity, range and outer half-angle.
+- **Add room fog** creates a box. Scale it to enclose a room, then set its density
+  and color. Spotlights scatter inside the box and use the same shadow maps as the floor.
+- Choose **Paint leak on surface** or **Paint chipped metal**, then click a mesh.
+  The projector aligns to the face. Move, rotate or scale it with the usual tools.
+  Opacity, tint and wetness are editable. Select the decal in the object list to
+  edit it independently of the wall.
+- Select a block or imported model and open **Properties…** to override roughness
+  or normal-map strength for that placement. Leave a field empty to keep the
+  source material value. Normal strength affects materials with normal maps.
+
+The High preset handles up to four local spots, two shadowed spots, four visible
+fog volumes and twelve decals. The Fast preset skips contact shading and fog.
+
 ## Build a room
 
 1. Start with the floor and player spawn. Add a block, select it in the viewport
@@ -35,7 +55,7 @@ positions, positive scales and Euler angles in degrees. The engine is Y-up.
 2. Use the move handles to place objects. Quarter-metre snapping applies to
    mouse translation. Typed distances use the exact value.
 3. Use **Import model** for a local glTF 2.0 GLB or glTF scene. The imported
-   scene moves as one placement. The viewport shows solid, material-colored meshes in their static pose. Playtest shows game lighting, textures and animation.
+   scene moves as one placement. Solid mode shows material-colored meshes. Lit mode shows game lighting and textures. Playtest also animates characters.
    Import authored collision markers with the model, or add blockout collision
    using blocks. A trigger exports an invisible volume. The engine tests
    triggers using their world-axis-aligned bounding boxes.

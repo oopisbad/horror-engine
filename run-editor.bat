@@ -1,7 +1,7 @@
 @echo off
 setlocal
 pushd "%~dp0"
-if not exist "%~dp0build-windows\gorex_viewport.dll" (
+if not exist "%~dp0build-windows\gorex_lighting.dll" (
     call "%~dp0build-windows.bat"
     if errorlevel 1 goto failed
 )

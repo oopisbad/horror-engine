@@ -37,6 +37,35 @@ class MapTests(unittest.TestCase):
             self.assertIn(obj["node"], names)
             self.assertIn("SPAWN_player", names)
 
+    def test_lighting_export_and_material_isolation(self):
+        doc = maps.new_map()
+        floor = doc["objects"][0]
+        floor["properties"] = {"roughness": 0.21}
+        lamp = maps.item("spot", "Emergency")
+        lamp["properties"] = {"intensity": 48, "color_g": 0.2}
+        fog = maps.item("fog", "Hall")
+        fog["properties"] = {"density": 0.4}
+        chip = maps.item("chip", "Paint")
+        doc["objects"].extend([lamp, fog, chip, maps.item("block", "Concrete")])
+        with TemporaryDirectory(dir=Path(__file__).resolve().parent) as tmp:
+            project = Path(tmp) / "map.goremap"
+            maps.save(project, doc)
+            level = project.with_suffix(".gltf")
+            gltf.export(level, maps.load(project))
+            out = json.loads(level.read_text())
+            by_name = {n["name"]: n for n in out["nodes"]}
+            self.assertEqual(by_name[maps.runtime_name(fog)]["extras"]["density"], 0.4)
+            self.assertTrue(by_name[maps.runtime_name(lamp)]["extras"]["cast_shadow"])
+            self.assertEqual(
+                out["extensions"]["KHR_lights_punctual"]["lights"][0]["color"],
+                [1, 0.2, 1],
+            )
+            self.assertIn("DECAL_CHIP_" + chip["id"], by_name)
+            self.assertEqual(
+                [m["pbrMetallicRoughness"]["roughnessFactor"] for m in out["materials"]],
+                [0.8, 0.21],
+            )
+
     def test_import_indices_and_dependencies(self):
         doc = maps.new_map()
         for filename in ("import-lab.glb", "CesiumMan.glb", "Fox.glb"):

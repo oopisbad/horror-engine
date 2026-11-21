@@ -5,6 +5,7 @@ import ctypes as ct
 import itertools
 import json
 import math
+import tempfile
 import tkinter as tk
 from pathlib import Path
 
@@ -53,6 +54,19 @@ class Viewport(tk.Frame):
         if not self.gl.vp_init(self.winfo_id()):
             self.gl.vp_close()
             raise OSError("Windows could not create an OpenGL editor viewport.")
+        self.lighting = ct.CDLL(str(path.with_name("gorex_lighting.dll")))
+        self.lighting.lit_load.argtypes = [ct.c_char_p]
+        self.lighting.lit_load.restype = ct.c_char_p
+        self.lighting.lit_transform.argtypes = [ct.c_char_p, FP, FP, FP]
+        self.lighting.lit_transform.restype = None
+        self.lighting.lit_draw.argtypes = [I, I, FP, FP]
+        self.lighting.lit_draw.restype = ct.c_char_p
+        self.lighting.lit_close.argtypes = []
+        self.lighting.lit_close.restype = None
+        self.preview_dir = tempfile.TemporaryDirectory(prefix="editor-lit-", dir=path.parent)
+        self.signature = None
+        self.transforms = {}
+        self.paint_kind = None
         self.models = {}
         self.bounds = {}
         self.center = [0.0, 0.0, 0.0]
@@ -82,9 +96,12 @@ class Viewport(tk.Frame):
             self.after_cancel(self.pending)
         for m in self.models.values():
             self.gl.vp_free(m)
+        self.lighting.lit_close()
         self.gl.vp_close()
+        self.preview_dir.cleanup()
 
     def forget(self, path):
+        self.signature = None
         old = self.models.pop(str(path), None)
         if old:
             self.gl.vp_free(old)
@@ -123,7 +140,8 @@ class Viewport(tk.Frame):
             self.center = [(min(c) + max(c)) / 2 for c in zip(*points)]
             aspect = max(0.2, self.winfo_width() / max(1, self.winfo_height()))
             self.distance = max(
-                2, max(math.dist(p, self.center) for p in points) * 2.85 / min(aspect, 1)
+                2,
+                max(math.dist(p, self.center) for p in points) * 2.85 / min(aspect, 1),
             )
         self.redraw()
 
@@ -136,33 +154,90 @@ class Viewport(tk.Frame):
         if self.winfo_ismapped():
             self.render()
 
+    def draw_lit(self, w, h, eye):
+        objects = self.editor.doc["objects"]
+        signature = [
+            (
+                o["id"],
+                o["kind"],
+                o["name"],
+                o.get("asset"),
+                tuple(sorted(o.get("properties", {}).items())),
+            )
+            for o in objects
+        ]
+        if signature != self.signature:
+            path = Path(self.preview_dir.name) / "preview.gltf"
+            gltf.export(path, self.editor.doc)
+            error = self.lighting.lit_load(str(path).encode())
+            if error:
+                raise ValueError(error.decode(errors="replace"))
+            self.signature = signature
+            self.transforms.clear()
+        for o in objects:
+            trs = (
+                tuple(o["position"]),
+                tuple(rotation.orientation(o)),
+                tuple(o["scale"]),
+            )
+            if self.transforms.get(o["id"]) != trs:
+                self.lighting.lit_transform(
+                    o["id"].encode(),
+                    V3(*trs[0]),
+                    V4(*rotation.quaternion(trs[1])),
+                    V3(*trs[2]),
+                )
+                self.transforms[o["id"]] = trs
+        error = self.lighting.lit_draw(w, h, V3(*eye), V3(*self.center))
+        if error:
+            raise ValueError(error.decode(errors="replace"))
+
     def render(self, pick=False):
         w, h = max(1, self.winfo_width()), max(1, self.winfo_height())
         _, _, back = self.basis()
         eye = [c + self.distance * v for c, v in zip(self.center, back)]
         self.gl.vp_begin(w, h, V3(*eye), V3(*self.center), pick)
         objects = self.editor.doc["objects"]
+        lit = not pick and self.editor.lit.get() and bool(objects)
+        if lit:
+            try:
+                self.draw_lit(w, h, eye)
+            except (OSError, ValueError, KeyError, IndexError, TypeError) as exc:
+                self.editor.lit.set(False)
+                self.editor.status.set(f"Lit preview failed: {exc}")
+                lit = False
         selected = None
         for idx, o in enumerate(objects):
             k = o["kind"]
             model = self.models.get(o.get("asset"))
             q = rotation.quaternion(rotation.orientation(o))
+            if o["id"] == self.editor.selection:
+                selected = (idx, o, q)
+            if (
+                lit
+                and k in ("block", "model")
+                or pick
+                and self.paint_kind
+                and k not in ("block", "model")
+            ):
+                continue
             self.gl.vp_object(
                 idx,
-                {"block": 0, "trigger": 1, "spawn": 2, "model": 3}[k],
+                {"block": 0, "trigger": 1, "spawn": 2, "model": 3, "spot": 5}.get(k, 4),
                 model,
                 V3(*o["position"]),
                 V4(*q),
                 V3(*o["scale"]),
                 o["id"] == self.editor.selection,
             )
-            if o["id"] == self.editor.selection:
-                selected = (idx, o, q)
-        if not self.editor.pinning:
+        if not self.editor.pinning and not self.paint_kind:
             for idx, o in enumerate(objects):
                 for i, n in enumerate(o["notes"]):
                     self.gl.vp_pin(
-                        idx, i, V3(*maps.world(o, n["local"])), n["id"] == self.editor.pin
+                        idx,
+                        i,
+                        V3(*maps.world(o, n["local"])),
+                        n["id"] == self.editor.pin,
                     )
             if selected:
                 idx, o, q = selected
@@ -184,6 +259,52 @@ class Viewport(tk.Frame):
             return tuple(hit), list(point)
         return None, None
 
+    def start_paint(self, kind):
+        if self.editor.finish_fields():
+            self.paint_kind = kind
+            self.editor.pinning = False
+            self.focus_set()
+            self.editor.status.set("Click a surface to place the decal. Escape cancels.")
+
+    def paint_decal(self, event, hit, point):
+        if not hit:
+            self.redraw()
+            return
+        # The pick framebuffer still contains the same draw. Adjacent depth
+        # samples give a face normal for floors, ceilings and sloped meshes.
+        tangents = []
+        for dx, dy in ((1, 0), (0, -1)):
+            nearby = []
+            for sign in (1, -1):
+                x, y = event.x + sign * dx, event.y + sign * dy
+                if not (0 <= x < self.winfo_width() and 0 <= y < self.winfo_height()):
+                    continue
+                other, p = (I * 4)(), V3()
+                if self.gl.vp_hit(x, y, other, p) and tuple(other)[:2] == hit[:2]:
+                    nearby.append([(b - a) * sign for a, b in zip(point, p)])
+            if not nearby:
+                self.editor.status.set("Click slightly inside the surface edge.")
+                self.redraw()
+                return
+            tangents.append(min(nearby, key=lambda v: dot(v, v)))
+        a, b = tangents
+        n = [a[(i + 1) % 3] * b[(i + 2) % 3] - a[(i + 2) % 3] * b[(i + 1) % 3] for i in range(3)]
+        length = math.sqrt(dot(n, n))
+        if length < 1e-12:
+            self.redraw()
+            return
+        x, y, z = [v / length for v in n]
+        obj = maps.item(self.paint_kind, self.paint_kind.title(), point, (1.2, 1.5, 0.1))
+        obj["rotation"] = [
+            math.degrees(-math.asin(max(-1, min(1, y)))),
+            math.degrees(math.atan2(x, z)),
+            0,
+        ]
+        self.editor.checkpoint()
+        self.editor.doc["objects"].append(obj)
+        self.paint_kind = None
+        self.editor.select(obj)
+
     def click(self, event):
         self.focus_set()
         if self.session:
@@ -193,6 +314,9 @@ class Viewport(tk.Frame):
         if not e.finish_fields():
             return
         hit, point = self.hit(event.x, event.y)
+        if self.paint_kind:
+            self.paint_decal(event, hit, point)
+            return
         if e.pinning:
             if not hit or e.doc["objects"][hit[0]]["id"] != e.selection:
                 e.status.set("Click a visible surface of the selected object.")
@@ -244,7 +368,8 @@ class Viewport(tk.Frame):
     def wheel(self, event):
         if not self.session:
             self.distance = min(
-                100000, max(0.12, self.distance * (0.83 if event.delta > 0 else 1 / 0.83))
+                100000,
+                max(0.12, self.distance * (0.83 if event.delta > 0 else 1 / 0.83)),
             )
             self.redraw()
 
@@ -382,6 +507,7 @@ class Viewport(tk.Frame):
         self.editor.status.set(TOOLS[self.tool] + " confirmed.")
 
     def cancel(self):
+        self.paint_kind = None
         if self.session:
             old = self.session["original"]
             for o in self.editor.doc["objects"]:
@@ -395,6 +521,10 @@ class Viewport(tk.Frame):
 
     def key(self, event):
         key = event.keysym.lower()
+        if key == "escape" and self.paint_kind:
+            self.cancel()
+            self.redraw()
+            return "break"
         if self.session:
             s = self.session
             if event.state & 4:

@@ -7,6 +7,11 @@ layout(location=2) in vec2 vUv;
 layout(location=3) in vec4 vShadowPos;
 layout(location=4) in vec4 vTangent;
 layout(location=5) in vec2 vLightmapUv;
+layout(location=6) in vec4 vPreviousClip;
+uniform vec2 uPixelSize;
+uniform vec2 uRasterOffset;
+layout(location=2) out vec4 oMotion;
+layout(location=3) out vec3 oIndirect;
 layout(location=0) out vec4 oColor;
 layout(location=1) out vec4 oSurface;
 
@@ -67,6 +72,25 @@ struct Decal { mat4 worldToBox; vec4 tintStrength; vec2 patternWetness; };
 uniform Decal uDecals[12];
 uniform int uDecalCount;
 
+layout(binding=20) uniform sampler2D uFlashDepth;
+layout(binding=21) uniform sampler2D uSpotDepth0;
+layout(binding=22) uniform sampler2D uSpotDepth1;
+
+// In perspective depth, (receiver - blocker) / blocker equals the
+// difference in device depths times receiver distance / near (up to near/far).
+float penumbra(sampler2D map, vec3 p, float receiver, float nearPlane)
+{
+    ivec2 size = textureSize(map, 0);
+    ivec2 c = ivec2(p.xy * vec2(size));
+    float separation = 0.0, count = 0.0;
+    for (int y = -1; y <= 1; y += 2)
+        for (int x = -1; x <= 1; x += 2) {
+            float d = texelFetch(map, clamp(c + ivec2(x,y)*3, ivec2(0), size-1), 0).r;
+            if (d < p.z) { separation += p.z - d; count += 1.0; }
+        }
+    return clamp(0.65 + 4.0 * separation * receiver / (max(count,1.0)*nearPlane), 0.65, 3.5);
+}
+
 float sampleShadow(vec4 shadowPos, float NoL, vec2 depthGradient)
 {
     if (uShadows == 0 || shadowPos.w <= 0.0)
@@ -80,10 +104,11 @@ float sampleShadow(vec4 shadowPos, float NoL, vec2 depthGradient)
 
     // Nine bilinear comparison taps approximate a soft tent. Filtering the
     // individual visibility results avoids comparing interpolated depths.
+    float radius = penumbra(uFlashDepth, p, shadowPos.w, 0.1);
     float sum = 0.0;
     for (int y = -1; y <= 1; ++y)
         for (int x = -1; x <= 1; ++x) {
-            vec2 offset = vec2(x,y) * texel * (4.0/3.0);
+            vec2 offset = vec2(x,y) * texel * radius;
             float reference = p.z + clamp(dot(depthGradient,offset), -0.001,0.001);
             sum += texture(uShadowMap, vec3(p.xy + offset, reference));
         }
@@ -98,10 +123,11 @@ float spotVisibility(int slot, vec3 position, float facing)
     vec3 p = clip.xyz / clip.w * 0.5 + 0.5;
     if (any(lessThan(p,vec3(0))) || any(greaterThan(p,vec3(1)))) return 1.0;
     p.z -= min(0.0014, 0.006 / max(0.04, clip.w*clip.w)) * mix(1.0,0.45,facing);
+    float radius = slot == 0 ? penumbra(uSpotDepth0,p,clip.w,0.06) : penumbra(uSpotDepth1,p,clip.w,0.06);
     float result = 0.0;
     for (int y = -1; y <= 1; y += 2)
         for (int x = -1; x <= 1; x += 2) {
-            vec3 tap = p + vec3(vec2(x,y) * (0.8/1024.0),0);
+            vec3 tap = p + vec3(vec2(x,y) * (radius/1024.0),0);
             result += slot == 0 ? texture(uLocalShadow0,tap) : texture(uLocalShadow1,tap);
         }
     return result * 0.25;
@@ -127,7 +153,7 @@ float noise(vec2 v)
     return mix(mix(h.x,h.y,f.x),mix(h.z,h.w,f.x),f.y);
 }
 
-void applyDecals(vec3 normal, inout vec3 albedo, inout float wetness)
+void applyDecals(vec3 normal, inout vec3 albedo, inout float wetness, inout float metallic, inout float roughness)
 {
     for (int i = 0; i < uDecalCount; ++i) {
         Decal decal = uDecals[i];
@@ -144,7 +170,9 @@ void applyDecals(vec3 normal, inout vec3 albedo, inout float wetness)
             breakup *= smoothstep(0.35,0.80,noise(uv*vec2(24,2.5))) * uv.y;
         else if (pattern == 2)
             breakup *= smoothstep(0.35,0.85,noise(vec2(uv.x,uv.y+uv.x*0.4)*vec2(5,49)));
+        if (pattern == 3) breakup = smoothstep(0.48, 0.56, breakup);
         float alpha = clamp(edge*facing*breakup*decal.tintStrength.a,0.0,1.0);
+        if (pattern == 3) { metallic = mix(metallic, 0.92, alpha); roughness = mix(roughness, 0.32, alpha); }
         albedo = mix(albedo,decal.tintStrength.rgb,alpha);
         wetness = max(wetness,alpha*decal.patternWetness.y);
     }
@@ -194,6 +222,10 @@ vec3 brdf(vec3 N, vec3 V, vec3 L, vec3 albedo, float roughness, float metallic, 
 
 void main()
 {
+    oIndirect = vec3(0);
+    oMotion = vPreviousClip.w > 0.0
+        ? vec4(vPreviousClip.xy / vPreviousClip.w * 0.5 + 0.5
+             - (gl_FragCoord.xy*uPixelSize-uRasterOffset), vPreviousClip.w, 1) : vec4(0);
     // Compute derivatives before per-pixel discard or light cone branches.
     vec3 projected = vShadowPos.xyz * (0.5 / max(abs(vShadowPos.w), 0.01));
     vec3 dx = dFdx(projected), dy = dFdy(projected);
@@ -249,7 +281,7 @@ void main()
 
     float wetness = uWetness;
     if (uDecalCount > 0)
-        applyDecals(Ng, albedo, wetness);
+        applyDecals(Ng, albedo, wetness, metallic, roughness);
     if (wetness > 0.0) {
         float patches = smoothstep(0.16, 0.73, noise(vWorldPos.xz * 2.7));
         wetness *= mix(0.48, 1.0, patches);
@@ -272,6 +304,7 @@ void main()
     if (uProbeCount > 0)
         lit += probeReflection(reflect(-V,N),roughness,fresnel);
 
+    oIndirect = lit;
     for (int i = 0; i < int(uPointLightCount); ++i) {
         vec3 delta = uPointLights[i].position - vWorldPos;
         float d2 = dot(delta, delta);

@@ -101,8 +101,19 @@ void Framebuffer::create()
         glTextureParameteri(surface, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
         colorTextures_.push_back(surface);
         glNamedFramebufferTexture(fbo_, GL_COLOR_ATTACHMENT1, surface, 0);
-        constexpr GLenum attachments[] = {GL_COLOR_ATTACHMENT0, GL_COLOR_ATTACHMENT1};
-        glNamedFramebufferDrawBuffers(fbo_, 2, attachments);
+        // Previous projected position/depth and indirect lighting for contact shading.
+        constexpr GLenum formats[] = {GL_RGBA16F, GL_R11F_G11F_B10F};
+        for (GLenum storage : formats) {
+            GLuint texture;
+            glCreateTextures(GL_TEXTURE_2D, 1, &texture);
+            glTextureStorage2D(texture, 1, storage, width_, height_);
+            glTextureParameteri(texture, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+            glTextureParameteri(texture, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+            glNamedFramebufferTexture(fbo_, GL_COLOR_ATTACHMENT0 + colorTextures_.size(), texture, 0);
+            colorTextures_.push_back(texture);
+        }
+        constexpr GLenum attachments[] = {GL_COLOR_ATTACHMENT0, GL_COLOR_ATTACHMENT1, GL_COLOR_ATTACHMENT2, GL_COLOR_ATTACHMENT3};
+        glNamedFramebufferDrawBuffers(fbo_, 4, attachments);
     }
 
     if (kind_ == Kind::DepthOnly || kind_ == Kind::ColorDepth || kind_ == Kind::Surface) {

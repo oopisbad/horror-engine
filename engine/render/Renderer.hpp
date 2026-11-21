@@ -12,6 +12,7 @@
 #include <cstdint>
 #include <memory>
 #include <vector>
+#include <unordered_map>
 
 namespace horror {
 
@@ -37,13 +38,12 @@ struct RenderItem {
     bool castsShadow = true;
     bool cameraVisible = false;
     bool dynamic = false;
+    EntityId entity = kInvalidEntity;
     // Non-null for skinned meshes: packed joint matrices from the Animator.
     const std::vector<glm::mat4> *bones = nullptr;
 };
 
-// Ambient occlusion isn't in scope yet; ambient is a flat term with a very
-// low floor so pitch-black rooms are actually pitch-black except for what
-// the flashlight hits.
+// A low ambient floor leaves unlit areas dark enough for the flashlight.
 struct AmbientLight {
     glm::vec3 color{0.008f, 0.010f, 0.014f}; // very low, slightly blue "night" tint
     float intensity = 1.0f;
@@ -58,6 +58,7 @@ struct PostSettings {
     float bloom = 0.15f;
     int volumeSteps = 12;
     float grain = 0.014f;          // 0 = off
+    bool contactShading = true;
     bool temporalAA = true;
     bool screenReflections = true;
     float fogDensity = 0.055f;    // exponential-squared fog (1/m)
@@ -78,9 +79,10 @@ struct RenderStats {
     uint32_t activeDecals = 0;
     uint32_t activeFogVolumes = 0;
     uint32_t temporalFrames = 0;
+    uint32_t rigidMotionDraws = 0, skinnedMotionDraws = 0;
     bool screenReflections = false;
     // Last complete sample from the asynchronous GPU query ring, in milliseconds.
-    std::array<double, 4> gpuMs{}; // shadow, geometry, effects, composite
+    std::array<double, 8> gpuMs{}; // shadow, geometry, temporal, reflections, contact, fog, bloom, composite
     uint32_t gpuSamples = 0;
 };
 
@@ -123,6 +125,8 @@ public:
     void setRenderScale(float scale);
     void setLocalShadowBudget(int spot, bool point) { spotShadowBudget_ = spot; pointShadows_ = point; }
     void resetHistory() { historyValid_ = false; }
+    void resetSceneCaches();
+    void invalidateProbes() { for (auto &probe : probes_) probe.ready = false; }
     void setGpuProfiling(bool enabled) { profileGpu_ = enabled; }
     // Monotonic seconds for screen-space effects (film grain animation).
     void setTime(float seconds) { timeSeconds_ = seconds; }
@@ -152,8 +156,10 @@ private:
     void buildQueue(Scene &scene, const Camera &camera);
     void mainPass(Scene &scene, Camera &camera);
     void postPass(const Camera &camera);
-    void effectsPass(const Camera &camera);
+    void effectsPass(const Camera &camera, GLuint volumeEnd);
+    void contactPass(const Camera &camera);
     void drawDebugData(Scene &scene, Camera &camera);
+    void bindLocalSpots(const Shader &shader);
     void setupLightingUniforms(const Shader &shader, const Camera &camera);
     void bindLitUniforms(const Shader &shader, Camera &camera);
     void uploadBones(const std::vector<glm::mat4> &bones);
@@ -168,16 +174,23 @@ private:
     std::unique_ptr<Shader> bloomShader_;
     std::unique_ptr<Shader> volumeShader_;
     std::unique_ptr<Shader> pointShadowShader_, pointShadowSkinnedShader_;
-    std::unique_ptr<Shader> temporalShader_, reflectionShader_;
+    std::unique_ptr<Shader> temporalShader_, reflectionShader_, contactShader_;
 
     // GPU skinning: bone matrices for the current draw. std140 mat4[128].
     static constexpr int kMaxBones = 128;
-    GLuint boneUbo_ = 0;
+    GLuint boneUbo_ = 0, previousBoneUbo_ = 0;
+    struct Pose {
+        glm::mat4 world{1};
+        std::vector<glm::mat4> bones;
+        uint64_t frame = 0;
+    };
+    std::unordered_map<EntityId, Pose> poses_;
+    uint64_t poseFrame_ = 0;
 
     std::unique_ptr<Framebuffer> shadowTarget_; // depth-only, flashlight view
     std::unique_ptr<Framebuffer> sceneTarget_;  // HDR color + depth, post input
     std::unique_ptr<Framebuffer> volumeTarget_;
-    std::unique_ptr<Framebuffer> probeTarget_, reflectionTarget_;
+    std::unique_ptr<Framebuffer> probeTarget_, reflectionTarget_, contactTarget_;
     std::array<std::unique_ptr<Framebuffer>, 2> history_;
     bool historyValid_ = false;
     bool temporalActive_ = false;
@@ -196,7 +209,7 @@ private:
     float renderScale_ = 1.0f;
     bool profileGpu_ = false;
     struct GpuFrame {
-        std::array<GLuint, 5> marks{};
+        std::array<GLuint, 9> marks{};
         bool pending = false;
     };
     std::array<GpuFrame, 12> gpuFrames_{};
